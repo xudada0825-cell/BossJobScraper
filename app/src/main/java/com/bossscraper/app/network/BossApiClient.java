@@ -1,5 +1,7 @@
 package com.bossscraper.app.network;
 
+import android.content.Context;
+import android.content.SharedPreferences;
 import android.util.Log;
 
 import com.bossscraper.app.model.JobItem;
@@ -21,26 +23,20 @@ import okhttp3.Response;
 
 /**
  * Boss直聘 API 客户端
- *
- * 使用Boss直聘公开搜索接口抓取外贸类招聘信息。
- * 注意：该接口为非官方接口，仅用于学习研究目的。
- * 实际使用须遵守平台服务条款。
+ * 登录后自动携带 Cookie，获取真实招聘数据；未登录时返回演示数据。
  */
 public class BossApiClient {
 
     private static final String TAG = "BossApiClient";
 
-    // 外贸相关关键词
     private static final String[] FOREIGN_TRADE_KEYWORDS = {
             "外贸", "外贸业务员", "国际贸易", "外贸跟单", "跨境电商",
             "外贸销售", "进出口", "外贸经理", "跨境贸易", "海外销售"
     };
 
-    // Boss直聘搜索接口（JSON API）
     private static final String BASE_URL =
             "https://www.zhipin.com/wapi/zpgeek/search/joblist.json";
 
-    // 城市代码映射（Boss直聘城市code）
     public static final String[][] CITY_CODES = {
             {"全国", "100010000"},
             {"北京", "101010100"},
@@ -63,50 +59,55 @@ public class BossApiClient {
             {"长沙", "101250100"},
             {"东莞", "101281600"},
             {"义乌", "101210600"},
-            {"义乌", "101210600"},
     };
 
     private final OkHttpClient httpClient;
+    private final Context context;
 
-    public BossApiClient() {
+    public BossApiClient(Context context) {
+        this.context = context.getApplicationContext();
         httpClient = new OkHttpClient.Builder()
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(20, TimeUnit.SECONDS)
                 .writeTimeout(10, TimeUnit.SECONDS)
-                .addInterceptor(chain -> {
-                    Request original = chain.request();
-                    Request request = original.newBuilder()
-                            .header("User-Agent", "Mozilla/5.0 (Linux; Android 11; Pixel 5) "
-                                    + "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                    + "Chrome/120.0.0.0 Mobile Safari/537.36")
-                            .header("Accept", "application/json, text/plain, */*")
-                            .header("Accept-Language", "zh-CN,zh;q=0.9")
-                            .header("Referer", "https://www.zhipin.com/")
-                            .header("X-Requested-With", "XMLHttpRequest")
-                            .build();
-                    return chain.proceed(request);
-                })
+                .followRedirects(true)
                 .build();
     }
 
     public interface FetchCallback {
-        void onSuccess(List<JobItem> jobs);
+        void onSuccess(List<JobItem> jobs, boolean isRealData);
         void onError(String errorMsg);
     }
 
-    /**
-     * 抓取外贸招聘数据
-     *
-     * @param cityCode 城市代码，传 "100010000" 表示全国
-     * @param callback 结果回调
-     */
-    public void fetchForeignTradeJobs(String cityCode, FetchCallback callback) {
-        List<JobItem> allJobs = new ArrayList<>();
-        // 只用前3个关键词以控制请求量
-        fetchKeyword(FOREIGN_TRADE_KEYWORDS[0], cityCode, allJobs, 0, callback);
+    /** 读取已保存的 Cookie */
+    private String getSavedCookie() {
+        SharedPreferences prefs = context.getSharedPreferences("boss_prefs", Context.MODE_PRIVATE);
+        return prefs.getString("cookie", null);
     }
 
-    private void fetchKeyword(String keyword, String cityCode,
+    public boolean isLoggedIn() {
+        String cookie = getSavedCookie();
+        return cookie != null && cookie.contains("wt2");
+    }
+
+    public void logout() {
+        context.getSharedPreferences("boss_prefs", Context.MODE_PRIVATE)
+               .edit().clear().apply();
+    }
+
+    public void fetchForeignTradeJobs(String cityCode, FetchCallback callback) {
+        String cookie = getSavedCookie();
+        if (cookie != null && cookie.contains("wt2")) {
+            // 已登录：真实请求
+            fetchKeyword(FOREIGN_TRADE_KEYWORDS[0], cityCode, cookie,
+                    new ArrayList<>(), 0, callback);
+        } else {
+            // 未登录：直接返回演示数据
+            callback.onSuccess(generateDemoData(cityCode), false);
+        }
+    }
+
+    private void fetchKeyword(String keyword, String cityCode, String cookie,
                                List<JobItem> accumulated, int keywordIndex,
                                FetchCallback callback) {
         String url = BASE_URL
@@ -115,45 +116,56 @@ public class BossApiClient {
                 + "&city=" + cityCode
                 + "&experience=&jobType=&salary=&page=1"
                 + "&pageSize=20"
-                + "&publishTime=1"; // publishTime=1 表示最近24小时，最新发布
+                + "&publishTime=1";
 
         Request request = new Request.Builder()
                 .url(url)
                 .get()
+                .header("User-Agent",
+                        "Mozilla/5.0 (Linux; Android 11; Pixel 5) " +
+                        "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                        "Chrome/120.0.0.0 Mobile Safari/537.36")
+                .header("Accept", "application/json, text/plain, */*")
+                .header("Accept-Language", "zh-CN,zh;q=0.9")
+                .header("Referer", "https://www.zhipin.com/web/geek/job?query=" + keyword
+                        + "&city=" + cityCode)
+                .header("Cookie", cookie)
+                .header("X-Requested-With", "XMLHttpRequest")
                 .build();
 
         httpClient.newCall(request).enqueue(new Callback() {
             @Override
             public void onFailure(Call call, IOException e) {
                 Log.e(TAG, "Request failed: " + e.getMessage());
-                // 即使单个请求失败也返回已有数据
                 if (accumulated.isEmpty()) {
-                    callback.onError("网络请求失败：" + e.getMessage()
-                            + "\n\n提示：Boss直聘需要登录后才能访问完整数据，"
-                            + "当前使用的是演示模式。");
+                    callback.onError("网络请求失败：" + e.getMessage());
                 } else {
-                    callback.onSuccess(accumulated);
+                    callback.onSuccess(accumulated, true);
                 }
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException {
-                if (!response.isSuccessful()) {
-                    int code = response.code();
-                    response.close();
-                    Log.w(TAG, "HTTP " + code + " for keyword: " + keyword);
-                    // Boss直聘会对未登录请求返回非200，使用演示数据
-                    if (accumulated.isEmpty()) {
-                        List<JobItem> demoData = generateDemoData(cityCode);
-                        callback.onSuccess(demoData);
-                    } else {
-                        callback.onSuccess(accumulated);
-                    }
+                int code = response.code();
+                String body = response.body() != null ? response.body().string() : "";
+                response.close();
+
+                if (code == 401 || code == 403) {
+                    // Cookie 已过期
+                    logout();
+                    callback.onError("登录已过期，请重新扫码登录");
                     return;
                 }
 
-                String body = response.body() != null ? response.body().string() : "";
-                response.close();
+                if (!response.isSuccessful()) {
+                    Log.w(TAG, "HTTP " + code);
+                    if (accumulated.isEmpty()) {
+                        callback.onSuccess(generateDemoData(cityCode), false);
+                    } else {
+                        callback.onSuccess(accumulated, true);
+                    }
+                    return;
+                }
 
                 try {
                     List<JobItem> parsed = parseResponse(body, cityCode);
@@ -163,16 +175,15 @@ public class BossApiClient {
                     Log.e(TAG, "Parse error: " + e.getMessage());
                 }
 
-                // 继续下一个关键词（最多3个）
                 int nextIndex = keywordIndex + 1;
                 if (nextIndex < 3 && nextIndex < FOREIGN_TRADE_KEYWORDS.length) {
-                    fetchKeyword(FOREIGN_TRADE_KEYWORDS[nextIndex], cityCode,
+                    fetchKeyword(FOREIGN_TRADE_KEYWORDS[nextIndex], cityCode, cookie,
                             accumulated, nextIndex, callback);
                 } else {
                     if (accumulated.isEmpty()) {
-                        callback.onSuccess(generateDemoData(cityCode));
+                        callback.onSuccess(generateDemoData(cityCode), false);
                     } else {
-                        callback.onSuccess(accumulated);
+                        callback.onSuccess(accumulated, true);
                     }
                 }
             }
@@ -184,7 +195,6 @@ public class BossApiClient {
         try {
             JsonObject root = JsonParser.parseString(json).getAsJsonObject();
             int code = root.has("code") ? root.get("code").getAsInt() : -1;
-
             if (code != 0) return result;
 
             JsonObject zpData = root.getAsJsonObject("zpData");
@@ -195,24 +205,20 @@ public class BossApiClient {
 
             for (JsonElement el : jobList) {
                 JsonObject job = el.getAsJsonObject();
+                String jobTitle      = getStr(job, "jobName");
+                String companyName   = getStr(job, "brandName");
+                String salary        = getStr(job, "salaryDesc");
+                String city          = getStr(job, "cityName");
+                String area          = getStr(job, "areaDistrict");
+                String businessDist  = getStr(job, "businessDistrict");
+                String jobUrl        = "https://www.zhipin.com/job_detail/"
+                                     + getStr(job, "encryptJobId") + ".html";
+                String companyType   = getStr(job, "brandIndustry");
+                String companyScale  = getStr(job, "brandScaleName");
+                String address       = buildAddress(city, area, businessDist);
 
-                String jobTitle = getStr(job, "jobName");
-                String companyName = getStr(job, "brandName");
-                String salary = getStr(job, "salaryDesc");
-                String city = getStr(job, "cityName");
-                String area = getStr(job, "areaDistrict");
-                String businessDistrict = getStr(job, "businessDistrict");
-                String jobUrl = "https://www.zhipin.com/job_detail/" + getStr(job, "encryptJobId") + ".html";
-                String companyType = getStr(job, "brandIndustry");
-                String companyScale = getStr(job, "brandScaleName");
-
-                String address = buildAddress(city, area, businessDistrict);
-
-                JobItem item = new JobItem(
-                        jobTitle, companyName, address, city, area,
-                        salary, "刚刚", jobUrl, companyType, companyScale
-                );
-                result.add(item);
+                result.add(new JobItem(jobTitle, companyName, address, city, area,
+                        salary, "刚刚", jobUrl, companyType, companyScale));
             }
         } catch (Exception e) {
             Log.e(TAG, "parseResponse error: " + e.getMessage());
@@ -242,9 +248,6 @@ public class BossApiClient {
         return "";
     }
 
-    /**
-     * 演示数据（当接口未登录或请求被限制时展示）
-     */
     private List<JobItem> generateDemoData(String cityCode) {
         List<JobItem> list = new ArrayList<>();
         String[][] demoJobs = {
@@ -264,16 +267,12 @@ public class BossApiClient {
                 {"外贸跟单主管", "宁波中欧贸易有限公司", "宁波", "鄞州区", "12-18K", "宁波 · 鄞州区 · 南部商务区", "贸易/进出口", "100-499人"},
                 {"亚马逊运营", "杭州极速跨境电商有限公司", "杭州", "滨江区", "10-20K", "杭州 · 滨江区 · 网易科技园", "电商/新零售", "100-499人"},
         };
-
         String[] timeLabels = {"刚刚", "1分钟前", "2分钟前", "3分钟前", "4分钟前"};
         for (int i = 0; i < demoJobs.length; i++) {
             String[] d = demoJobs[i];
-            JobItem item = new JobItem(
-                    d[0], d[1], d[5], d[2], d[3],
+            list.add(new JobItem(d[0], d[1], d[5], d[2], d[3],
                     d[4], timeLabels[i % timeLabels.length],
-                    "https://www.zhipin.com/", d[6], d[7]
-            );
-            list.add(item);
+                    "https://www.zhipin.com/", d[6], d[7]));
         }
         return list;
     }
