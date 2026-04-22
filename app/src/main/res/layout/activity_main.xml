@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
@@ -8,34 +7,73 @@
 
     <!-- Header bar -->
     <LinearLayout
-        android:id="@+id/headerBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
         android:background="#1565C0"
         android:paddingTop="16dp"
-        android:paddingBottom="12dp"
+        android:paddingBottom="10dp"
         android:paddingStart="16dp"
         android:paddingEnd="16dp"
         android:elevation="4dp">
 
-        <TextView
-            android:layout_width="wrap_content"
+        <!-- 标题行 -->
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="外贸招聘监控"
-            android:textColor="#FFFFFF"
-            android:textSize="20sp"
-            android:textStyle="bold"
-            android:letterSpacing="0.05" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
 
-        <TextView
-            android:id="@+id/tvSubtitle"
-            android:layout_width="wrap_content"
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="外贸招聘监控"
+                android:textColor="#FFFFFF"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <!-- 登录状态按钮 -->
+            <TextView
+                android:id="@+id/btnLoginStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="30dp"
+                android:text="扫码登录"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
+                android:background="@drawable/btn_login_bg"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true" />
+        </LinearLayout>
+
+        <!-- 登录状态提示行 -->
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Boss直聘 · 实时抓取"
-            android:textColor="#B3E5FC"
-            android:textSize="12sp"
-            android:layout_marginTop="2dp" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginTop="6dp">
+
+            <TextView
+                android:id="@+id/tvLoginState"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="未登录 · 显示演示数据"
+                android:textColor="#90CAF9"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/tvSubtitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Boss直聘 · 实时抓取"
+                android:textColor="#B3E5FC"
+                android:textSize="12sp" />
+        </LinearLayout>
     </LinearLayout>
 
     <!-- Filter + Status bar -->
@@ -50,7 +88,6 @@
         android:paddingBottom="10dp"
         android:elevation="2dp">
 
-        <!-- City filter row -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -88,7 +125,6 @@
                 android:paddingEnd="14dp" />
         </LinearLayout>
 
-        <!-- Status row -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -124,6 +160,32 @@
         </LinearLayout>
     </LinearLayout>
 
+    <!-- 真实数据横幅（登录后显示） -->
+    <TextView
+        android:id="@+id/tvRealDataBanner"
+        android:layout_width="match_parent"
+        android:layout_height="30dp"
+        android:gravity="center"
+        android:text="已登录 · 正在显示真实招聘数据"
+        android:textSize="12sp"
+        android:textColor="#FFFFFF"
+        android:background="#2E7D32"
+        android:visibility="gone" />
+
+    <!-- 演示数据横幅（未登录时显示） -->
+    <TextView
+        android:id="@+id/tvDemoBanner"
+        android:layout_width="match_parent"
+        android:layout_height="30dp"
+        android:gravity="center"
+        android:text="演示模式 · 扫码登录后获取真实数据"
+        android:textSize="12sp"
+        android:textColor="#FFFFFF"
+        android:background="#E65100"
+        android:visibility="visible"
+        android:clickable="true"
+        android:focusable="true" />
+
     <!-- Loading indicator -->
     <ProgressBar
         android:id="@+id/progressBar"
@@ -134,7 +196,7 @@
         android:indeterminateTint="#1565C0"
         android:visibility="gone" />
 
-    <!-- Job list with swipe refresh -->
+    <!-- Job list -->
     <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
         android:id="@+id/swipeRefresh"
         android:layout_width="match_parent"
@@ -164,13 +226,13 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="暂无数据"
+            android:text="&#128269;"
             android:textSize="48sp" />
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="点击刷新按钮加载外贸招聘数据"
+            android:text="暂无数据，点击刷新"
             android:textSize="14sp"
             android:textColor="#888888"
             android:layout_marginTop="8dp" />
