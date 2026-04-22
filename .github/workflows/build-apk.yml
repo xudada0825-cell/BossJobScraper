@@ -1,0 +1,65 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Gradle wrapper
+        run: |
+          gradle wrapper --gradle-version=8.4 --distribution-type=bin
+          chmod +x gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BossJobScraper-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      - name: Create GitHub Release with APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: "外贸招聘监控 v1.0.${{ github.run_number }}"
+          body: |
+            ## Boss直聘外贸招聘监控 APK
+
+            **直接下载 APK 安装到手机 ↓**
+
+            ### 功能
+            - 实时抓取Boss直聘外贸类招聘（外贸/国际贸易/跨境电商等8个关键词）
+            - 列表显示：公司名称、完整地址、职位名称、薪资、发布时间
+            - 按城市筛选（全国/北京/上海/广州/深圳/义乌等21个城市）
+            - 每5分钟自动刷新，右上角显示倒计时
+            - 下拉刷新 & 一键立即刷新
+
+            ### 安装步骤
+            1. 点击下方 `app-debug.apk` 下载到手机
+            2. 手机设置 → 安全 → 允许安装未知来源应用
+            3. 打开下载的APK文件点击安装
+          files: app/build/outputs/apk/debug/app-debug.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
