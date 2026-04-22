@@ -132,6 +132,9 @@ public class MainActivity extends AppCompatActivity {
             if (msg == null || msg.isEmpty()) return;
             Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
             if (msg.contains("登录已过期")) {
+                // 同步清掉持久化标志，保证 onResume 读到正确状态
+                getSharedPreferences("boss_prefs", MODE_PRIVATE)
+                    .edit().putBoolean("logged_in", false).apply();
                 updateLoginStateUI(false);
             }
         });
@@ -198,6 +201,8 @@ public class MainActivity extends AppCompatActivity {
                         .setMessage("确定退出登录？退出后将显示演示数据。")
                         .setPositiveButton("退出", (d, w) -> {
                             viewModel.logout();
+                            getSharedPreferences("boss_prefs", MODE_PRIVATE)
+                                .edit().putBoolean("logged_in", false).apply();
                             updateLoginStateUI(false);
                         })
                         .setNegativeButton("取消", null)
