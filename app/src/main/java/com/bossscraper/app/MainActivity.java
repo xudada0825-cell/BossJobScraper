@@ -28,23 +28,24 @@ public class MainActivity extends AppCompatActivity {
     private JobViewModel viewModel;
     private JobAdapter   adapter;
 
-    // All views typed exactly as they appear in layout XML
-    private Spinner          spinnerCity;
-    private RecyclerView     recyclerView;
+    // All views — typed as View or the exact XML type to avoid ClassCastException
+    private Spinner            spinnerCity;
+    private RecyclerView       recyclerView;
     private SwipeRefreshLayout swipeRefresh;
-    private ProgressBar      progressBar;
-    private TextView         tvLastUpdate;
-    private TextView         tvCountdown;
-    private TextView         tvJobCount;
-    private TextView         tvLoginState;
-    private TextView         btnLoginStatus;   // TextView in layout
-    private TextView         tvRealDataBanner;
-    private TextView         tvDemoBanner;
-    private View             emptyView;
-    private TextView         btnRefresh;       // use TextView for refresh too (safer)
+    private ProgressBar        progressBar;
+    private TextView           tvLastUpdate;
+    private TextView           tvCountdown;
+    private TextView           tvJobCount;
+    private TextView           tvLoginState;
+    private View               btnLoginStatus;   // TextView in XML, use View
+    private TextView           tvRealDataBanner;
+    private TextView           tvDemoBanner;
+    private View               emptyView;
+    private View               btnRefresh;       // TextView in XML, use View
 
+    // Track login state across onResume to detect login/logout transitions
+    private boolean wasLoggedIn = false;
     private boolean spinnerReady = false;
-    private boolean returnedFromLogin = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -52,40 +53,35 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         initViews();
+        setupRecyclerView();
+        setupCitySpinner();
+        setupSwipeRefresh();
+        setupClickListeners();
+
         viewModel = new ViewModelProvider(this).get(JobViewModel.class);
         observeViewModel();
-        setupCitySpinner();
-        setupRecyclerView();
-        setupSwipeRefresh();
-        setupButtons();
 
-        // First load
-        if (savedInstanceState == null) {
-            triggerRefresh();
-        }
-    }
+        wasLoggedIn = isLoggedIn();
+        updateLoginUI(wasLoggedIn);
 
-    @Override
-    protected void onNewIntent(Intent intent) {
-        super.onNewIntent(intent);
-        setIntent(intent);
+        // Initial load
+        triggerRefresh();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        boolean loggedIn = getSharedPreferences("boss_prefs", MODE_PRIVATE)
-                .getBoolean("logged_in", false);
-        updateLoginStateUI(loggedIn);
+        boolean loggedIn = isLoggedIn();
+        updateLoginUI(loggedIn);
 
-        // If we just came back from login, do one refresh
-        if (returnedFromLogin) {
-            returnedFromLogin = false;
+        // If login state changed (just logged in or logged out), refresh data
+        if (loggedIn != wasLoggedIn) {
+            wasLoggedIn = loggedIn;
             triggerRefresh();
         }
     }
 
-    // ── Views ────────────────────────────────────────────────────────────
+    // ── Init ─────────────────────────────────────────────────────────────
 
     private void initViews() {
         spinnerCity      = findViewById(R.id.spinnerCity);
@@ -100,32 +96,86 @@ public class MainActivity extends AppCompatActivity {
         tvRealDataBanner = findViewById(R.id.tvRealDataBanner);
         tvDemoBanner     = findViewById(R.id.tvDemoBanner);
         emptyView        = findViewById(R.id.emptyView);
-        // btnRefresh is AppCompatButton in layout — find as View first, set click listener
-        View refreshBtn  = findViewById(R.id.btnRefresh);
-        if (refreshBtn != null) refreshBtn.setOnClickListener(v -> triggerRefresh());
+        btnRefresh       = findViewById(R.id.btnRefresh);
+    }
+
+    private void setupRecyclerView() {
+        adapter = new JobAdapter(this);
+        if (recyclerView != null) {
+            recyclerView.setLayoutManager(new LinearLayoutManager(this));
+            recyclerView.setAdapter(adapter);
+        }
+    }
+
+    private void setupCitySpinner() {
+        if (spinnerCity == null) return;
+        String[] names = new String[BossApiClient.CITY_CODES.length];
+        for (int i = 0; i < names.length; i++) names[i] = BossApiClient.CITY_CODES[i][0];
+
+        ArrayAdapter<String> a = new ArrayAdapter<>(
+                this, android.R.layout.simple_spinner_item, names);
+        a.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerCity.setAdapter(a);
+
+        spinnerCity.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                if (!spinnerReady) { spinnerReady = true; return; }
+                if (viewModel != null)
+                    viewModel.fetchJobs(BossApiClient.CITY_CODES[pos][1],
+                                        BossApiClient.CITY_CODES[pos][0]);
+            }
+            @Override public void onNothingSelected(AdapterView<?> p) {}
+        });
+    }
+
+    private void setupSwipeRefresh() {
+        if (swipeRefresh != null)
+            swipeRefresh.setOnRefreshListener(this::triggerRefresh);
+    }
+
+    private void setupClickListeners() {
+        if (btnRefresh != null)
+            btnRefresh.setOnClickListener(v -> triggerRefresh());
+
+        if (btnLoginStatus != null) {
+            btnLoginStatus.setOnClickListener(v -> {
+                if (isLoggedIn()) {
+                    new AlertDialog.Builder(this)
+                            .setTitle("退出登录")
+                            .setMessage("确定退出登录？")
+                            .setPositiveButton("退出", (d, w) -> doLogout())
+                            .setNegativeButton("取消", null)
+                            .show();
+                } else {
+                    startActivity(new Intent(this, LoginActivity.class));
+                }
+            });
+        }
+
+        if (tvDemoBanner != null)
+            tvDemoBanner.setOnClickListener(v ->
+                    startActivity(new Intent(this, LoginActivity.class)));
     }
 
     // ── Observers ────────────────────────────────────────────────────────
 
     private void observeViewModel() {
         viewModel.getFilteredJobs().observe(this, jobs -> {
-            if (jobs != null && !jobs.isEmpty()) {
-                adapter.setJobs(jobs);
-                if (recyclerView != null) recyclerView.setVisibility(View.VISIBLE);
-                if (emptyView    != null) emptyView.setVisibility(View.GONE);
-                if (tvJobCount   != null) tvJobCount.setText(jobs.size() + " 条");
-            } else {
-                adapter.setJobs(null);
-                if (recyclerView != null) recyclerView.setVisibility(View.GONE);
-                if (emptyView    != null) emptyView.setVisibility(View.VISIBLE);
-                if (tvJobCount   != null) tvJobCount.setText("");
-            }
+            boolean hasJobs = jobs != null && !jobs.isEmpty();
+            adapter.setJobs(hasJobs ? jobs : null);
+            if (recyclerView != null)
+                recyclerView.setVisibility(hasJobs ? View.VISIBLE : View.GONE);
+            if (emptyView != null)
+                emptyView.setVisibility(hasJobs ? View.GONE : View.VISIBLE);
+            if (tvJobCount != null)
+                tvJobCount.setText(hasJobs ? jobs.size() + " 条" : "");
             if (swipeRefresh != null) swipeRefresh.setRefreshing(false);
         });
 
         viewModel.getIsLoading().observe(this, loading -> {
             if (loading == null) return;
-            if (progressBar  != null)
+            if (progressBar != null)
                 progressBar.setVisibility(loading ? View.VISIBLE : View.GONE);
             if (!loading && swipeRefresh != null)
                 swipeRefresh.setRefreshing(false);
@@ -137,113 +187,53 @@ public class MainActivity extends AppCompatActivity {
             if (msg.contains("登录已过期")) {
                 getSharedPreferences("boss_prefs", MODE_PRIVATE)
                         .edit().putBoolean("logged_in", false).apply();
-                updateLoginStateUI(false);
+                wasLoggedIn = false;
+                updateLoginUI(false);
             }
         });
 
-        viewModel.getLastUpdateTime().observe(this, time -> {
+        viewModel.getLastUpdateTime().observe(this, t -> {
             if (tvLastUpdate != null)
-                tvLastUpdate.setText("最后更新：" + (time != null ? time : "--"));
+                tvLastUpdate.setText("最后更新：" + (t != null ? t : "--"));
         });
 
-        viewModel.getCountdownSeconds().observe(this, seconds -> {
-            if (tvCountdown == null || seconds == null) return;
-            int min = seconds / 60, sec = seconds % 60;
-            tvCountdown.setText(
-                    String.format(Locale.CHINA, "下次刷新：%02d:%02d", min, sec));
+        viewModel.getCountdownSeconds().observe(this, s -> {
+            if (tvCountdown == null || s == null) return;
+            tvCountdown.setText(String.format(Locale.CHINA,
+                    "下次刷新：%02d:%02d", s / 60, s % 60));
         });
-
-        viewModel.getIsRealData().observe(this, realData -> {
-            if (Boolean.TRUE.equals(realData)) {
-                updateLoginStateUI(true);
-            }
-        });
-    }
-
-    // ── Setup ────────────────────────────────────────────────────────────
-
-    private void setupCitySpinner() {
-        if (spinnerCity == null) return;
-        String[] cityNames = new String[BossApiClient.CITY_CODES.length];
-        for (int i = 0; i < BossApiClient.CITY_CODES.length; i++) {
-            cityNames[i] = BossApiClient.CITY_CODES[i][0];
-        }
-        ArrayAdapter<String> cityAdapter = new ArrayAdapter<>(
-                this, android.R.layout.simple_spinner_item, cityNames);
-        cityAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        spinnerCity.setAdapter(cityAdapter);
-
-        spinnerCity.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
-                if (!spinnerReady) { spinnerReady = true; return; }
-                viewModel.fetchJobs(
-                        BossApiClient.CITY_CODES[pos][1],
-                        BossApiClient.CITY_CODES[pos][0]);
-            }
-            @Override public void onNothingSelected(AdapterView<?> parent) {}
-        });
-    }
-
-    private void setupRecyclerView() {
-        adapter = new JobAdapter(this);
-        if (recyclerView != null) {
-            recyclerView.setLayoutManager(new LinearLayoutManager(this));
-            recyclerView.setAdapter(adapter);
-        }
-    }
-
-    private void setupSwipeRefresh() {
-        if (swipeRefresh == null) return;
-        swipeRefresh.setOnRefreshListener(this::triggerRefresh);
-    }
-
-    private void setupButtons() {
-        if (btnLoginStatus != null) {
-            btnLoginStatus.setOnClickListener(v -> {
-                if (viewModel.isLoggedIn()) {
-                    new AlertDialog.Builder(this)
-                            .setTitle("退出登录")
-                            .setMessage("确定退出登录？退出后将显示演示数据。")
-                            .setPositiveButton("退出", (d, w) -> {
-                                viewModel.logout();
-                                getSharedPreferences("boss_prefs", MODE_PRIVATE)
-                                        .edit().putBoolean("logged_in", false).apply();
-                                updateLoginStateUI(false);
-                            })
-                            .setNegativeButton("取消", null)
-                            .show();
-                } else {
-                    returnedFromLogin = true;
-                    startActivity(new Intent(this, LoginActivity.class));
-                }
-            });
-        }
-
-        if (tvDemoBanner != null) {
-            tvDemoBanner.setOnClickListener(v -> {
-                returnedFromLogin = true;
-                startActivity(new Intent(this, LoginActivity.class));
-            });
-        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
+
+    private boolean isLoggedIn() {
+        return getSharedPreferences("boss_prefs", MODE_PRIVATE)
+                .getBoolean("logged_in", false);
+    }
 
     private void triggerRefresh() {
         if (viewModel == null || spinnerCity == null) return;
         int pos = spinnerCity.getSelectedItemPosition();
         if (pos < 0 || pos >= BossApiClient.CITY_CODES.length) pos = 0;
-        viewModel.fetchJobs(
-                BossApiClient.CITY_CODES[pos][1],
-                BossApiClient.CITY_CODES[pos][0]);
+        viewModel.fetchJobs(BossApiClient.CITY_CODES[pos][1],
+                            BossApiClient.CITY_CODES[pos][0]);
     }
 
-    private void updateLoginStateUI(boolean loggedIn) {
-        if (btnLoginStatus != null)
-            btnLoginStatus.setText(loggedIn ? "退出登录" : "登录");
+    private void doLogout() {
+        getSharedPreferences("boss_prefs", MODE_PRIVATE)
+                .edit().clear().apply();
+        wasLoggedIn = false;
+        if (viewModel != null) viewModel.logout();
+        updateLoginUI(false);
+    }
+
+    private void updateLoginUI(boolean loggedIn) {
+        // btnLoginStatus is a TextView in XML — cast safely
+        if (btnLoginStatus instanceof TextView)
+            ((TextView) btnLoginStatus).setText(loggedIn ? "退出登录" : "登录");
         if (tvLoginState != null)
-            tvLoginState.setText(loggedIn ? "已登录 · 获取真实数据" : "未登录 · 显示演示数据");
+            tvLoginState.setText(loggedIn
+                    ? "已登录 · 获取真实数据" : "未登录 · 显示演示数据");
         if (tvRealDataBanner != null)
             tvRealDataBanner.setVisibility(loggedIn ? View.VISIBLE : View.GONE);
         if (tvDemoBanner != null)
