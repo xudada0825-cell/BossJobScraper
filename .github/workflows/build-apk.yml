@@ -58,6 +58,6 @@ jobs:
           fi
 
           # Delete existing APK asset (if any) and re-upload
-          gh release delete-asset "$TAG" app-debug-v2.apk --yes 2>/dev/null || true
-          gh release upload "$TAG" "$APK#app-debug-v2.apk" --clobber
-          echo "Release updated: https://github.com/$REPO/releases/download/$TAG/app-debug-v2.apk"
+          gh release delete-asset "$TAG" app-debug.apk --yes 2>/dev/null || true
+          gh release upload "$TAG" "$APK#app-debug.apk" --clobber
+          echo "Release updated: https://github.com/$REPO/releases/download/$TAG/app-debug.apk"
