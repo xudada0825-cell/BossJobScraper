@@ -2,8 +2,6 @@ package com.bossscraper.app;
 
 import android.content.Intent;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
@@ -41,7 +39,6 @@ public class MainActivity extends AppCompatActivity {
     private androidx.appcompat.widget.AppCompatButton btnRefresh;
 
     private boolean spinnerReady = false;
-    private final Handler handler = new Handler(Looper.getMainLooper());
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -49,7 +46,6 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         initViews();
-        // ViewModel 必须在 initViews 之后初始化
         viewModel = new ViewModelProvider(this).get(JobViewModel.class);
         observeViewModel();
         setupCitySpinner();
@@ -57,8 +53,10 @@ public class MainActivity extends AppCompatActivity {
         setupSwipeRefresh();
         setupButtons();
 
-        // 首次加载
-        triggerRefresh();
+        // 首次加载（只在 onCreate 触发，不在 onResume）
+        if (savedInstanceState == null) {
+            triggerRefresh();
+        }
     }
 
     @Override
@@ -70,21 +68,10 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        // 直接读 SharedPreferences，避免 ViewModel 未初始化时的竞争
+        // 只更新 UI 状态，不触发任何网络请求
         boolean loggedIn = getSharedPreferences("boss_prefs", MODE_PRIVATE)
                 .getBoolean("logged_in", false);
         updateLoginStateUI(loggedIn);
-
-        if (getIntent() != null && getIntent().getBooleanExtra("refresh_after_login", false)) {
-            getIntent().removeExtra("refresh_after_login");
-            handler.postDelayed(this::triggerRefresh, 400);
-        }
-    }
-
-    @Override
-    protected void onDestroy() {
-        handler.removeCallbacksAndMessages(null);
-        super.onDestroy();
     }
 
     // ── 初始化 ──────────────────────────────────────────────
@@ -132,7 +119,6 @@ public class MainActivity extends AppCompatActivity {
             if (msg == null || msg.isEmpty()) return;
             Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
             if (msg.contains("登录已过期")) {
-                // 同步清掉持久化标志，保证 onResume 读到正确状态
                 getSharedPreferences("boss_prefs", MODE_PRIVATE)
                     .edit().putBoolean("logged_in", false).apply();
                 updateLoginStateUI(false);
@@ -150,7 +136,6 @@ public class MainActivity extends AppCompatActivity {
         });
 
         viewModel.getIsRealData().observe(this, realData -> {
-            // 只在确认是真实数据时更新横幅，不能用 false 来强制"退出登录"状态
             if (Boolean.TRUE.equals(realData)) {
                 updateLoginStateUI(true);
             }
@@ -228,16 +213,17 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updateLoginStateUI(boolean loggedIn) {
+        if (btnLoginStatus == null || tvLoginState == null) return;
         if (loggedIn) {
             btnLoginStatus.setText("退出登录");
             tvLoginState.setText("已登录 · 获取真实数据");
-            tvRealDataBanner.setVisibility(View.VISIBLE);
-            tvDemoBanner.setVisibility(View.GONE);
+            if (tvRealDataBanner != null) tvRealDataBanner.setVisibility(View.VISIBLE);
+            if (tvDemoBanner != null)     tvDemoBanner.setVisibility(View.GONE);
         } else {
-            btnLoginStatus.setText("扫码登录");
+            btnLoginStatus.setText("登录");
             tvLoginState.setText("未登录 · 显示演示数据");
-            tvRealDataBanner.setVisibility(View.GONE);
-            tvDemoBanner.setVisibility(View.VISIBLE);
+            if (tvRealDataBanner != null) tvRealDataBanner.setVisibility(View.GONE);
+            if (tvDemoBanner != null)     tvDemoBanner.setVisibility(View.VISIBLE);
         }
     }
 }
