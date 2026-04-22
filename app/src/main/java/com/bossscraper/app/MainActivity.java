@@ -3,10 +3,7 @@ package com.bossscraper.app;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
-import android.widget.AdapterView;
-import android.widget.ArrayAdapter;
 import android.widget.ProgressBar;
-import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -18,7 +15,6 @@ import androidx.recyclerview.widget.RecyclerView;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 import com.bossscraper.app.adapter.JobAdapter;
-import com.bossscraper.app.network.BossApiClient;
 import com.bossscraper.app.viewmodel.JobViewModel;
 
 import java.io.BufferedReader;
@@ -33,7 +29,6 @@ public class MainActivity extends AppCompatActivity {
     private JobViewModel viewModel;
     private JobAdapter   adapter;
 
-    private Spinner            spinnerCity;
     private RecyclerView       recyclerView;
     private SwipeRefreshLayout swipeRefresh;
     private ProgressBar        progressBar;
@@ -44,8 +39,6 @@ public class MainActivity extends AppCompatActivity {
     private TextView           tvStatus;
     private TextView           btnRefresh;
 
-    private boolean spinnerReady = false;
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -53,7 +46,6 @@ public class MainActivity extends AppCompatActivity {
 
         showPreviousCrashIfAny();
 
-        spinnerCity  = findViewById(R.id.spinnerCity);
         recyclerView = findViewById(R.id.recyclerView);
         swipeRefresh = findViewById(R.id.swipeRefresh);
         progressBar  = findViewById(R.id.progressBar);
@@ -64,36 +56,13 @@ public class MainActivity extends AppCompatActivity {
         tvStatus     = findViewById(R.id.tvStatus);
         btnRefresh   = findViewById(R.id.btnRefresh);
 
-        // RecyclerView
         adapter = new JobAdapter(this);
         recyclerView.setLayoutManager(new LinearLayoutManager(this));
         recyclerView.setAdapter(adapter);
 
-        // City spinner
-        String[] names = new String[BossApiClient.CITY_CODES.length];
-        for (int i = 0; i < names.length; i++) names[i] = BossApiClient.CITY_CODES[i][0];
-        ArrayAdapter<String> spinnerAdapter = new ArrayAdapter<>(
-                this, android.R.layout.simple_spinner_item, names);
-        spinnerAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        spinnerCity.setAdapter(spinnerAdapter);
-        spinnerCity.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
-                if (!spinnerReady) { spinnerReady = true; return; }
-                if (viewModel != null)
-                    viewModel.fetchJobs(BossApiClient.CITY_CODES[pos][1],
-                                        BossApiClient.CITY_CODES[pos][0]);
-            }
-            @Override public void onNothingSelected(AdapterView<?> p) {}
-        });
-
-        // Swipe refresh
         swipeRefresh.setOnRefreshListener(this::refresh);
-
-        // Refresh button
         if (btnRefresh != null) btnRefresh.setOnClickListener(v -> refresh());
 
-        // ViewModel
         viewModel = new ViewModelProvider(this).get(JobViewModel.class);
 
         viewModel.getFilteredJobs().observe(this, jobs -> {
@@ -134,16 +103,12 @@ public class MainActivity extends AppCompatActivity {
             tvStatus.setText(real ? "● 数据来源：智联招聘" : "○ 暂无数据");
         });
 
-        // Initial load
         refresh();
     }
 
     private void refresh() {
-        if (viewModel == null || spinnerCity == null) return;
-        int pos = spinnerCity.getSelectedItemPosition();
-        if (pos < 0 || pos >= BossApiClient.CITY_CODES.length) pos = 0;
-        viewModel.fetchJobs(BossApiClient.CITY_CODES[pos][1],
-                            BossApiClient.CITY_CODES[pos][0]);
+        if (viewModel == null) return;
+        viewModel.fetchJobs();
     }
 
     private void showPreviousCrashIfAny() {
