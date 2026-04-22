@@ -72,15 +72,35 @@ public class BossApiClient {
     private final Handler main = new Handler(Looper.getMainLooper());
     private boolean destroyed = false;
 
+    // Track current in-flight WebView so we can cancel it
+    private WebView currentWv = null;
+    private Runnable currentTimeout = null;
+
     public BossApiClient(Context ctx) {
         this.appCtx = ctx.getApplicationContext();
     }
 
     public boolean isLoggedIn() { return false; }
     public void logout() {}
+
+    /** Cancel any in-flight request (e.g. when city changes). */
+    public void cancelPending() {
+        main.post(() -> {
+            if (currentTimeout != null) {
+                main.removeCallbacks(currentTimeout);
+                currentTimeout = null;
+            }
+            if (currentWv != null) {
+                destroyWv(currentWv);
+                currentWv = null;
+            }
+        });
+    }
+
     public void destroy() {
         destroyed = true;
         main.removeCallbacksAndMessages(null);
+        if (currentWv != null) { destroyWv(currentWv); currentWv = null; }
     }
 
     // ── Entry point ──────────────────────────────────────────────────────
@@ -109,12 +129,16 @@ public class BossApiClient {
                 "AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/124.0.6367.82 Mobile Safari/537.36");
 
+        currentWv = wv;
         Runnable timeoutTask = () -> {
             if (done.getAndSet(true)) return;
             Log.w(TAG, "timeout");
+            currentWv = null;
+            currentTimeout = null;
             destroyWv(wv);
             cb.onError("加载超时，请检查网络");
         };
+        currentTimeout = timeoutTask;
         main.postDelayed(timeoutTask, TIMEOUT_MS);
 
         wv.setWebViewClient(new WebViewClient() {
@@ -154,6 +178,8 @@ public class BossApiClient {
                 view.evaluateJavascript(js, raw -> {
                     if (done.getAndSet(true)) return;
                     main.removeCallbacks(timeoutTask);
+                    currentTimeout = null;
+                    currentWv = null;
                     destroyWv(wv);
 
                     Log.d(TAG, "JS result length=" + (raw != null ? raw.length() : 0));
