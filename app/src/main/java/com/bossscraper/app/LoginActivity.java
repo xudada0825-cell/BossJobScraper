@@ -3,7 +3,6 @@ package com.bossscraper.app;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -11,7 +10,6 @@ import android.util.Log;
 import android.view.View;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
-import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -25,22 +23,23 @@ import androidx.appcompat.app.AppCompatActivity;
 public class LoginActivity extends AppCompatActivity {
 
     private static final String TAG = "LoginActivity";
-    private static final String LOGIN_URL = "https://www.zhipin.com/web/user/?ka=header-login";
+    private static final String LOGIN_URL =
+            "https://www.zhipin.com/web/user/?ka=header-login";
 
     private WebView webView;
     private ProgressBar progressBar;
     private Button btnDone;
     private TextView tvHint;
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
-    // 自动检测登录状态（页面跳转后自动完成，无需用户点按钮）
-    private boolean loginHandled = false;
-    private final Runnable cookiePoller = new Runnable() {
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private boolean destroyed = false;
+
+    private final Runnable poller = new Runnable() {
         @Override
         public void run() {
-            if (loginHandled || isFinishing()) return;
-            if (trySaveCookie(false)) return; // 静默检测，成功后自动跳转
-            mainHandler.postDelayed(this, 2000);
+            if (destroyed) return;
+            checkLogin(false);
+            handler.postDelayed(this, 2000);
         }
     };
 
@@ -54,19 +53,23 @@ public class LoginActivity extends AppCompatActivity {
         btnDone     = findViewById(R.id.btnDone);
         tvHint      = findViewById(R.id.tvLoginHint);
 
+        if (webView == null || progressBar == null || btnDone == null || tvHint == null) {
+            Log.e(TAG, "Layout view not found, finishing");
+            finish();
+            return;
+        }
+
+        btnDone.setOnClickListener(v -> checkLogin(true));
+
         findViewById(R.id.btnBack).setOnClickListener(v -> {
             if (webView.canGoBack()) webView.goBack();
             else finish();
         });
 
-        // 用户手动点击"我已登录"作为兜底
-        btnDone.setOnClickListener(v -> trySaveCookie(true));
-
         setupWebView();
         webView.loadUrl(LOGIN_URL);
 
-        // 3 秒后开始轮询
-        mainHandler.postDelayed(cookiePoller, 3000);
+        handler.postDelayed(poller, 5000);
     }
 
     private void setupWebView() {
@@ -78,7 +81,6 @@ public class LoginActivity extends AppCompatActivity {
         s.setSupportZoom(true);
         s.setBuiltInZoomControls(true);
         s.setDisplayZoomControls(false);
-        // PC UA：Boss 直聘 PC 端提供账号/验证码/二维码三种登录方式
         s.setUserAgentString(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) " +
@@ -91,90 +93,89 @@ public class LoginActivity extends AppCompatActivity {
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
-            public void onPageStarted(WebView view, String url, Bitmap favicon) {
-                progressBar.setVisibility(View.VISIBLE);
-            }
-
-            @Override
             public void onPageFinished(WebView view, String url) {
+                if (destroyed) return;
                 progressBar.setVisibility(View.GONE);
                 Log.d(TAG, "pageFinish: " + url);
-
-                // 页面跳转到首页/个人中心 = 登录成功，尝试自动提取
-                if (!loginHandled && isHomeUrl(url)) {
-                    mainHandler.postDelayed(() -> trySaveCookie(false), 800);
+                // 跳到首页 = 登录成功
+                if (url != null && (
+                        url.equals("https://www.zhipin.com/") ||
+                        url.equals("https://www.zhipin.com") ||
+                        url.startsWith("https://www.zhipin.com/web/geek/") ||
+                        url.startsWith("https://www.zhipin.com/web/boss/"))) {
+                    handler.postDelayed(() -> checkLogin(false), 1000);
                 }
             }
 
             @Override
-            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                return false;
+            public void onPageStarted(android.webkit.WebView view, String url,
+                                      android.graphics.Bitmap favicon) {
+                if (destroyed) return;
+                progressBar.setVisibility(View.VISIBLE);
             }
         });
 
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onProgressChanged(WebView view, int newProgress) {
+                if (destroyed) return;
                 progressBar.setProgress(newProgress);
-                progressBar.setVisibility(newProgress < 100 ? View.VISIBLE : View.GONE);
+                progressBar.setVisibility(newProgress >= 100 ? View.GONE : View.VISIBLE);
             }
         });
     }
 
-    private boolean isHomeUrl(String url) {
-        if (url == null) return false;
-        return url.equals("https://www.zhipin.com/")
-            || url.equals("https://www.zhipin.com")
-            || url.startsWith("https://www.zhipin.com/web/geek/")
-            || url.startsWith("https://www.zhipin.com/web/boss/");
-    }
-
     /**
-     * 尝试提取并保存 Cookie。
-     * @param showToast 为 true 时（用户手动点击）会显示失败 Toast
-     * @return true = 登录成功并已跳转
+     * @param showError 是否在失败时显示 Toast（用户手动点击时传 true）
      */
-    private boolean trySaveCookie(boolean showToast) {
-        if (loginHandled) return true;
+    private void checkLogin(boolean showError) {
+        if (destroyed) return;
 
-        CookieManager.getInstance().flush();
-        String cookies = CookieManager.getInstance().getCookie("https://www.zhipin.com");
-        Log.d(TAG, "cookie check: " + (cookies != null ? cookies.length() + "chars" : "null"));
+        try {
+            CookieManager.getInstance().flush();
+            String cookie = CookieManager.getInstance().getCookie("https://www.zhipin.com");
+            Log.d(TAG, "cookie=" + (cookie != null ? cookie.length() + "chars" : "null"));
 
-        if (cookies != null && cookies.contains("wt2")) {
-            loginHandled = true;
-            mainHandler.removeCallbacks(cookiePoller);
+            if (cookie != null && cookie.contains("wt2")) {
+                // 登录成功，先停止一切后台操作
+                handler.removeCallbacksAndMessages(null);
 
-            getSharedPreferences("boss_prefs", Context.MODE_PRIVATE)
-                .edit()
-                .putString("cookie", cookies)
-                .putBoolean("logged_in", true)
-                .putLong("login_time", System.currentTimeMillis())
-                .apply();
+                // 保存 cookie
+                SharedPreferences prefs =
+                        getSharedPreferences("boss_prefs", Context.MODE_PRIVATE);
+                prefs.edit()
+                     .putString("cookie", cookie)
+                     .putBoolean("logged_in", true)
+                     .putLong("login_time", System.currentTimeMillis())
+                     .apply();
 
-            Toast.makeText(this, "登录成功！", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "登录成功！", Toast.LENGTH_SHORT).show();
 
-            Intent intent = new Intent(this, MainActivity.class);
-            intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            intent.putExtra("refresh_after_login", true);
-            startActivity(intent);
-            finish();
-            return true;
-        } else {
-            if (showToast) {
+                // 回到主页，不传 extra，避免主页触发额外刷新逻辑
+                Intent intent = new Intent(this, MainActivity.class);
+                intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP
+                              | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                startActivity(intent);
+                finish();
+
+            } else if (showError) {
                 Toast.makeText(this,
-                    "未检测到登录状态，请先完成登录再点击此按钮",
-                    Toast.LENGTH_LONG).show();
+                        "还未检测到登录，请先完成登录再点此按钮",
+                        Toast.LENGTH_LONG).show();
             }
-            return false;
+        } catch (Exception e) {
+            Log.e(TAG, "checkLogin error: " + e.getMessage());
         }
     }
 
     @Override
     protected void onDestroy() {
-        mainHandler.removeCallbacks(cookiePoller);
+        destroyed = true;
+        handler.removeCallbacksAndMessages(null);
         if (webView != null) {
             webView.stopLoading();
+            webView.setWebViewClient(null);
+            webView.setWebChromeClient(null);
             webView.destroy();
             webView = null;
         }
