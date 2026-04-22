@@ -39,29 +39,25 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
 
-      - name: Create GitHub Release with APK
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: "外贸招聘监控 v1.0.${{ github.run_number }}"
-          body: |
-            ## Boss直聘外贸招聘监控 APK
-
-            **直接下载 APK 安装到手机 ↓**
-
-            ### 功能
-            - 实时抓取Boss直聘外贸类招聘（外贸/国际贸易/跨境电商等8个关键词）
-            - 列表显示：公司名称、完整地址、职位名称、薪资、发布时间
-            - 按城市筛选（全国/北京/上海/广州/深圳/义乌等21个城市）
-            - 每5分钟自动刷新，右上角显示倒计时
-            - 下拉刷新 & 一键立即刷新
-
-            ### 安装步骤
-            1. 点击下方 `app-debug.apk` 下载到手机
-            2. 手机设置 → 安全 → 允许安装未知来源应用
-            3. 打开下载的APK文件点击安装
-          files: app/build/outputs/apk/debug/app-debug.apk
-          draft: false
-          prerelease: false
+      # Always update the same fixed release (v1.0) so the download link never changes
+      - name: Update fixed Release APK
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          TAG=v1.0
+          REPO=${{ github.repository }}
+
+          # Get or create the release
+          RELEASE=$(gh release view "$TAG" --json id,uploadUrl 2>/dev/null || echo "")
+          if [ -z "$RELEASE" ]; then
+            gh release create "$TAG" \
+              --title "外贸招聘监控 APK" \
+              --notes "Boss直聘外贸招聘监控，支持21城市筛选，5分钟自动刷新。" \
+              --latest
+          fi
+
+          # Delete existing APK asset (if any) and re-upload
+          gh release delete-asset "$TAG" app-debug-v2.apk --yes 2>/dev/null || true
+          gh release upload "$TAG" "$APK#app-debug-v2.apk" --clobber
+          echo "Release updated: https://github.com/$REPO/releases/download/$TAG/app-debug-v2.apk"
