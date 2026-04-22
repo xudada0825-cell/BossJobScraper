@@ -13,30 +13,30 @@ import android.webkit.WebViewClient;
 
 import com.bossscraper.app.model.JobItem;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Fetches real job listings from Zhaopin mobile site (m.zhaopin.com).
- * The mobile site renders job cards server-side (SSR) in the HTML,
- * so we can extract them from the page source without any API calls.
  *
- * Data flow:
- *   1. Load m.zhaopin.com/sou/?kw=外贸&cityId=XXX in a hidden WebView
- *   2. onPageFinished -> inject JS to get document.documentElement.outerHTML
- *   3. Parse HTML via regex to extract job cards
- *   4. Return results via callback
+ * Strategy:
+ *   1. Load m.zhaopin.com/sou/?kw=waiмао&cityId=XXX in a hidden WebView
+ *   2. onPageFinished -> inject JS to extract window.__INITIAL_DATA__.positionList as JSON
+ *   3. Parse JSON in Java -> List<JobItem>
+ *
+ * This avoids HTML regex and unicode-escape issues entirely.
  */
 public class BossApiClient {
 
     private static final String TAG        = "BossApiClient";
-    private static final int    TIMEOUT_MS = 20_000;
+    private static final int    TIMEOUT_MS = 25_000;
 
     // Zhaopin city IDs
     public static final String[][] CITY_CODES = {
@@ -76,7 +76,7 @@ public class BossApiClient {
         this.appCtx = ctx.getApplicationContext();
     }
 
-    public boolean isLoggedIn() { return false; } // no login needed
+    public boolean isLoggedIn() { return false; }
     public void logout() {}
     public void destroy() {
         destroyed = true;
@@ -92,7 +92,7 @@ public class BossApiClient {
         });
     }
 
-    // ── WebView load + HTML extraction ───────────────────────────────────
+    // ── WebView load + JS extraction ─────────────────────────────────────
 
     @SuppressLint("SetJavaScriptEnabled")
     private void loadAndParse(String cityCode, FetchCallback cb) {
@@ -104,7 +104,6 @@ public class BossApiClient {
         s.setDomStorageEnabled(true);
         s.setLoadsImagesAutomatically(false);
         s.setBlockNetworkImage(true);
-        // Mobile UA - zhaopin serves SSR HTML to mobile browsers
         s.setUserAgentString(
                 "Mozilla/5.0 (Linux; Android 14; Pixel 7) " +
                 "AppleWebKit/537.36 (KHTML, like Gecko) " +
@@ -124,33 +123,65 @@ public class BossApiClient {
                 if (done.get()) return;
                 Log.d(TAG, "onPageFinished: " + url);
 
-                // Extract full HTML via JS and send back to Java
-                view.evaluateJavascript(
-                    "(function(){ return document.documentElement.outerHTML; })()",
-                    html -> {
-                        if (done.getAndSet(true)) return;
-                        main.removeCallbacks(timeoutTask);
-                        destroyWv(wv);
+                // Extract positionList JSON directly from window.__INITIAL_DATA__
+                // We serialize only the fields we need to keep the string small.
+                String js =
+                    "(function() {" +
+                    "  try {" +
+                    "    var data = window.__INITIAL_DATA__;" +
+                    "    if (!data || !data.positionList) return 'NO_DATA';" +
+                    "    var list = data.positionList;" +
+                    "    var out = [];" +
+                    "    for (var i = 0; i < list.length; i++) {" +
+                    "      var j = list[i];" +
+                    "      var card = {};" +
+                    "      try { card = JSON.parse(j.cardCustomJson || '{}'); } catch(e) {}" +
+                    "      out.push({" +
+                    "        name: j.name || ''," +
+                    "        salary: j.salary60 || ''," +
+                    "        company: j.companyName || ''," +
+                    "        city: j.workCity || ''," +
+                    "        district: j.cityDistrict || ''," +
+                    "        street: j.streetName || ''," +
+                    "        industry: j.industryName || ''," +
+                    "        number: j.number || ''" +
+                    "      });" +
+                    "    }" +
+                    "    return JSON.stringify(out);" +
+                    "  } catch(e) { return 'ERR:' + e.message; }" +
+                    "})()";
 
-                        // evaluateJavascript returns a JSON string (quoted, escaped)
-                        String decoded = unquoteJs(html);
-                        Log.d(TAG, "HTML length=" + decoded.length());
+                view.evaluateJavascript(js, raw -> {
+                    if (done.getAndSet(true)) return;
+                    main.removeCallbacks(timeoutTask);
+                    destroyWv(wv);
 
-                        List<JobItem> jobs = parseZhaopinHtml(decoded);
-                        Log.d(TAG, "parsed jobs=" + jobs.size());
+                    Log.d(TAG, "JS result length=" + (raw != null ? raw.length() : 0));
 
-                        if (jobs.isEmpty()) {
-                            cb.onError("暂无数据，请稍后重试");
-                        } else {
-                            cb.onSuccess(jobs, true);
-                        }
-                    });
+                    // evaluateJavascript wraps result in JSON string quotes
+                    String jsonStr = unquoteJs(raw);
+                    Log.d(TAG, "unquoted prefix=" + jsonStr.substring(0, Math.min(200, jsonStr.length())));
+
+                    if (jsonStr.startsWith("NO_DATA") || jsonStr.startsWith("ERR") || jsonStr.isEmpty()) {
+                        cb.onError("暂无数据，请稍后重试");
+                        return;
+                    }
+
+                    List<JobItem> jobs = parseJsonJobs(jsonStr);
+                    Log.d(TAG, "parsed jobs=" + jobs.size());
+
+                    if (jobs.isEmpty()) {
+                        cb.onError("暂无招聘数据，请稍后重试");
+                    } else {
+                        cb.onSuccess(jobs, true);
+                    }
+                });
             }
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest req,
                                         WebResourceError err) {
-                if (req.isForMainFrame()) {
+                if (req != null && req.isForMainFrame()) {
                     Log.e(TAG, "WebView error: " + (err != null ? err.getDescription() : "?"));
                 }
             }
@@ -163,107 +194,101 @@ public class BossApiClient {
         wv.loadUrl(url);
     }
 
-    // ── HTML parser ──────────────────────────────────────────────────────
+    // ── JSON parser ───────────────────────────────────────────────────────
 
-    /**
-     * Parses Zhaopin mobile HTML job cards.
-     *
-     * Each card has a job link followed by text in this order:
-     *   JOB_NAME  SALARY  EXP  EDU  [TAGS]  COMPANY  INDUSTRY  [SCALE]  CITY  [DISTRICT]
-     */
-    private List<JobItem> parseZhaopinHtml(String html) {
+    private List<JobItem> parseJsonJobs(String json) {
         List<JobItem> out = new ArrayList<>();
-        if (html == null || html.length() < 100) return out;
-
-        // Find all job card anchors
-        Pattern urlPat = Pattern.compile(
-                "href=\"(https://m\\.zhaopin\\.com/jobs/[^\"]+)\"[^>]*>([^<]{2,60})</a>");
-        Matcher m = urlPat.matcher(html);
-
         String time = new SimpleDateFormat("HH:mm", Locale.CHINA).format(new Date());
+        try {
+            JSONArray arr = new JSONArray(json);
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject o = arr.getJSONObject(i);
+                String jobName  = o.optString("name", "");
+                String salary   = o.optString("salary", "薪资面议");
+                String company  = o.optString("company", "招聘企业");
+                String city     = o.optString("city", "");
+                String district = o.optString("district", "");
+                String street   = o.optString("street", "");
+                String industry = o.optString("industry", "贸易/进出口");
+                String number   = o.optString("number", "");
 
-        while (m.find()) {
-            String jobUrl  = m.group(1);
-            String jobName = m.group(2).trim();
-            if (jobName.isEmpty()) continue;
+                if (jobName.isEmpty()) continue;
+                if (salary.isEmpty()) salary = "薪资面议";
+                if (company.isEmpty()) company = "招聘企业";
 
-            // Grab the next 600 chars of text content after the link
-            int end = m.end();
-            String chunk = html.substring(end, Math.min(end + 600, html.length()));
-            // Strip HTML tags and collapse whitespace
-            String text = chunk.replaceAll("<[^>]+>", " ")
-                               .replaceAll("\\s+", " ")
-                               .trim();
+                String addr = city;
+                if (!district.isEmpty()) addr += " " + district;
+                if (!street.isEmpty()) addr += " " + street;
+                if (addr.trim().isEmpty()) addr = "地址待定";
 
-            // Salary: digits-digits元 or 万 pattern
-            String salary = extract(text,
-                    "(\\d[\\d\\-万]+元[^\\s]*)");
+                String jobUrl = number.isEmpty()
+                        ? "https://m.zhaopin.com/"
+                        : "https://jobs.zhaopin.com/" + number + ".htm";
 
-            // Company: look for 有限|集团|公司 etc.
-            String company = extract(text,
-                    "([^\\s]{2,25}(?:有限公司|集团|股份|工厂|贸易公司|进出口公司|电商))");
-            if (company.isEmpty()) {
-                // Fallback: long token after edu keywords
-                company = extract(text,
-                        "(?:本科|大专|硕士|高中|不限)\\s+([^\\s]{3,25})");
+                out.add(new JobItem(
+                        jobName, company, addr, city, district,
+                        salary, time, jobUrl, industry, ""));
             }
-
-            // City: known city names
-            String city = extract(text,
-                    "(北京|上海|广州|深圳|杭州|成都|武汉|南京|西安|苏州|宁波|青岛|天津|重庆|厦门|郑州|福州|长沙|东莞|义乌|全国)");
-
-            // District: token after city name
-            String district = "";
-            if (!city.isEmpty()) {
-                district = extract(text.substring(text.indexOf(city) + city.length()),
-                        "^\\s+([^\\s]{2,6})");
-            }
-
-            // Address display
-            String addr = city;
-            if (!district.isEmpty()) addr += " · " + district;
-            if (addr.isEmpty()) addr = "地址待定";
-
-            out.add(new JobItem(
-                    jobName,
-                    company.isEmpty() ? "招聘企业" : company,
-                    addr, city, district,
-                    salary.isEmpty() ? "薪资面议" : salary,
-                    time,
-                    jobUrl,
-                    "贸易/进出口",
-                    ""));
+        } catch (Exception e) {
+            Log.e(TAG, "JSON parse error: " + e.getMessage());
         }
         return out;
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────
-
-    private String extract(String text, String regex) {
-        Matcher m = Pattern.compile(regex).matcher(text);
-        return m.find() ? m.group(1).trim() : "";
-    }
+    // ── Helpers ───────────────────────────────────────────────────────────
 
     /**
-     * evaluateJavascript returns a JSON-encoded string:
-     * the value is wrapped in quotes, with backslash-n, backslash-t,
-     * and unicode escape sequences. We decode it back to plain HTML.
+     * evaluateJavascript returns a JSON-encoded string with surrounding quotes
+     * and backslash escapes. This method decodes it to the original string.
+     * We handle unicode escapes (backslash + u + 4 hex digits) properly
+     * so Chinese characters survive.
      */
     private String unquoteJs(String jsVal) {
         if (jsVal == null) return "";
-        // Remove surrounding quotes if present
+        // Remove surrounding JSON string quotes added by evaluateJavascript
         if (jsVal.startsWith("\"") && jsVal.endsWith("\"")) {
             jsVal = jsVal.substring(1, jsVal.length() - 1);
         }
-        // Unescape common sequences
-        return jsVal
-                .replace("\\n", "\n")
-                .replace("\\t", "\t")
-                .replace("\\r", "")
-                .replace("\\\"", "\"")
-                .replace("\\'", "'")
-                .replace("\\\\", "\\")
-                .replaceAll("[\\\\]u[0-9a-fA-F]{4}", "?"); // unicode escapes -> placeholder
+        // Use StringBuilder to process escape sequences manually
+        StringBuilder sb = new StringBuilder(jsVal.length());
+        int i = 0;
+        while (i < jsVal.length()) {
+            char c = jsVal.charAt(i);
+            if (c == '\\' && i + 1 < jsVal.length()) {
+                char next = jsVal.charAt(i + 1);
+                switch (next) {
+                    case 'n':  sb.append('\n'); i += 2; break;
+                    case 't':  sb.append('\t'); i += 2; break;
+                    case 'r':  i += 2; break;
+                    case '"':  sb.append('"');  i += 2; break;
+                    case '\'': sb.append('\''); i += 2; break;
+                    case '\\': sb.append('\\'); i += 2; break;
+                    case 'u':
+                        if (i + 5 < jsVal.length()) {
+                            try {
+                                int cp = Integer.parseInt(jsVal.substring(i + 2, i + 6), 16);
+                                sb.append((char) cp);
+                                i += 6;
+                            } catch (NumberFormatException e) {
+                                sb.append(c);
+                                i++;
+                            }
+                        } else {
+                            sb.append(c);
+                            i++;
+                        }
+                        break;
+                    default:
+                        sb.append(c);
+                        i++;
+                        break;
+                }
+            } else {
+                sb.append(c);
+                i++;
+            }
+        }
+        return sb.toString();
     }
 
     private void destroyWv(WebView wv) {
