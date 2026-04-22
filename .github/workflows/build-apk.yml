@@ -39,7 +39,7 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
 
-      - name: Update fixed Release APK
+      - name: Publish Release APK
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -47,12 +47,19 @@ jobs:
           TAG=v1.0
           REPO=${{ github.repository }}
 
-          # Create release if it doesn't exist
-          gh release view "$TAG" 2>/dev/null || gh release create "$TAG" \
+          # Delete existing release and tag so we can recreate cleanly
+          RELEASE_ID=$(gh api repos/$REPO/releases/tags/$TAG --jq .id 2>/dev/null || true)
+          if [ -n "$RELEASE_ID" ] && [ "$RELEASE_ID" != "null" ]; then
+            gh api --method DELETE repos/$REPO/releases/$RELEASE_ID
+          fi
+          gh api --method DELETE repos/$REPO/git/refs/tags/$TAG 2>/dev/null || true
+
+          sleep 2
+
+          # Create fresh release
+          gh release create "$TAG" "$APK" \
             --title "外贸招聘监控 APK" \
-            --notes "外贸招聘监控，支持21城市筛选，3分钟自动刷新。" \
+            --notes "外贸招聘监控，支持21城市筛选，3分钟自动刷新。\n\n点击下方 app-debug.apk 下载安装。" \
             --latest
 
-          # Upload with --clobber to overwrite existing asset
-          gh release upload "$TAG" "$APK" --clobber
-          echo "Release updated: https://github.com/$REPO/releases/download/$TAG/app-debug.apk"
+          echo "APK URL: https://github.com/$REPO/releases/download/$TAG/app-debug.apk"
