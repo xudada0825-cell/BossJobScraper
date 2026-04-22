@@ -27,6 +27,10 @@ public class JobViewModel extends AndroidViewModel {
     private static final String TAG              = "JobViewModel";
     private static final int    REFRESH_INTERVAL = 180; // 3 minutes
 
+    // Hardcoded: Guangzhou only
+    private static final String CITY_CODE = "763";
+    private static final String CITY_NAME = "广州";
+
     private final MutableLiveData<List<JobItem>> filteredJobs   = new MutableLiveData<>(new ArrayList<>());
     private final MutableLiveData<Boolean>       isLoading      = new MutableLiveData<>(false);
     private final MutableLiveData<String>        errorMessage   = new MutableLiveData<>();
@@ -38,8 +42,6 @@ public class JobViewModel extends AndroidViewModel {
     private final Handler       mainHandler = new Handler(Looper.getMainLooper());
     private final AtomicInteger cdAtom      = new AtomicInteger(REFRESH_INTERVAL);
 
-    private String  cityCode = "530"; // 全国
-    private String  cityName = "全国";
     private boolean fetching = false;
 
     private Timer refreshTimer;
@@ -51,8 +53,6 @@ public class JobViewModel extends AndroidViewModel {
         startTimers();
     }
 
-    // ── LiveData ─────────────────────────────────────────────────────────
-
     public LiveData<List<JobItem>> getFilteredJobs()    { return filteredJobs; }
     public LiveData<Boolean>       getIsLoading()       { return isLoading; }
     public LiveData<String>        getErrorMessage()    { return errorMessage; }
@@ -60,24 +60,13 @@ public class JobViewModel extends AndroidViewModel {
     public LiveData<Integer>       getCountdownSeconds(){ return countdownSecs; }
     public LiveData<Boolean>       getIsRealData()      { return isRealData; }
 
-    // ── Actions ──────────────────────────────────────────────────────────
-
-    public void fetchJobs(String code, String name) {
-        boolean cityChanged = !code.equals(cityCode);
-        // If city changed, cancel the in-flight request and clear stale data
-        if (cityChanged) {
-            fetching = false;
-            api.cancelPending();
-            filteredJobs.postValue(new ArrayList<>());
-        }
+    public void fetchJobs() {
         if (fetching) return;
         fetching = true;
-        cityCode = code;
-        cityName = name;
         isLoading.postValue(true);
         errorMessage.postValue(null);
 
-        api.fetchForeignTradeJobs(code, new BossApiClient.FetchCallback() {
+        api.fetchForeignTradeJobs(CITY_CODE, new BossApiClient.FetchCallback() {
             @Override
             public void onSuccess(List<JobItem> jobs, boolean real) {
                 fetching = false;
@@ -88,7 +77,7 @@ public class JobViewModel extends AndroidViewModel {
                         new SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(new Date()));
                 cdAtom.set(REFRESH_INTERVAL);
                 countdownSecs.postValue(REFRESH_INTERVAL);
-                Log.d(TAG, "fetchJobs success: " + jobs.size() + " jobs, real=" + real);
+                Log.d(TAG, "fetchJobs success: " + jobs.size() + " jobs");
             }
 
             @Override
@@ -103,15 +92,13 @@ public class JobViewModel extends AndroidViewModel {
         });
     }
 
-    // ── Timers ───────────────────────────────────────────────────────────
-
     private void startTimers() {
         stopTimers();
 
         refreshTimer = new Timer("AutoRefresh", true);
         refreshTimer.scheduleAtFixedRate(new TimerTask() {
             @Override public void run() {
-                mainHandler.post(() -> fetchJobs(cityCode, cityName));
+                mainHandler.post(() -> fetchJobs());
             }
         }, REFRESH_INTERVAL * 1000L, REFRESH_INTERVAL * 1000L);
 
