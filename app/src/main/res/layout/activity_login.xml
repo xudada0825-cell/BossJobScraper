@@ -5,6 +5,7 @@
     android:orientation="vertical"
     android:background="#FFFFFF">
 
+    <!-- 顶部标题栏 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="56dp"
@@ -28,7 +29,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="Boss\u76f4\u8058 \u626b\u7801\u767b\u5f55"
+            android:text="Boss直聘 登录"
             android:textColor="#FFFFFF"
             android:textSize="17sp"
             android:textStyle="bold"
@@ -36,18 +37,22 @@
 
     </LinearLayout>
 
+    <!-- 提示条 -->
     <TextView
         android:id="@+id/tvLoginHint"
         android:layout_width="match_parent"
-        android:layout_height="38dp"
+        android:layout_height="wrap_content"
         android:gravity="center"
-        android:text="\u4f7f\u7528Boss\u76f4\u8058App\u626b\u63cf\u4e8c\u7ef4\u7801\u767b\u5f55\uff0c\u767b\u5f55\u540e\u81ea\u52a8\u83b7\u53d6\u771f\u5b9e\u62db\u8058\u6570\u636e"
+        android:text="使用账号或验证码登录后，点击下方「完成登录」按钮"
         android:textSize="12sp"
         android:textColor="#FFFFFF"
         android:background="#FF6F00"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
         android:paddingStart="12dp"
         android:paddingEnd="12dp" />
 
+    <!-- 进度条 -->
     <ProgressBar
         android:id="@+id/loginProgress"
         android:layout_width="match_parent"
@@ -58,10 +63,22 @@
         android:progressTint="#1565C0"
         android:visibility="visible" />
 
+    <!-- WebView -->
     <WebView
         android:id="@+id/webView"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1" />
+
+    <!-- 底部按钮 -->
+    <Button
+        android:id="@+id/btnDone"
+        android:layout_width="match_parent"
+        android:layout_height="52dp"
+        android:text="完成登录"
+        android:textSize="16sp"
+        android:textColor="#FFFFFF"
+        android:background="#1565C0"
+        android:layout_margin="0dp" />
 
 </LinearLayout>
