@@ -24,7 +24,7 @@
             android:textSize="22sp"
             android:textStyle="bold"
             android:gravity="center"
-            android:onClick="onBackPressed" />
+            android:id="@+id/btnBack" />
 
         <TextView
             android:layout_width="0dp"
