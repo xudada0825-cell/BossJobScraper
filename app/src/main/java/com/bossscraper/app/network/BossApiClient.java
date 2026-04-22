@@ -263,7 +263,7 @@ public class BossApiClient {
                 .replace("\\\"", "\"")
                 .replace("\\'", "'")
                 .replace("\\\\", "\\")
-                .replaceAll("\\\\u([0-9a-fA-F]{4})", "?"); // unicode escapes -> placeholder
+                .replaceAll("[\\\\]u[0-9a-fA-F]{4}", "?"); // unicode escapes -> placeholder
     }
 
     private void destroyWv(WebView wv) {
