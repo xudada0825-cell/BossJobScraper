@@ -246,8 +246,8 @@ public class BossApiClient {
 
     /**
      * evaluateJavascript returns a JSON-encoded string:
-     * the value is wrapped in quotes, with \n \t \uXXXX escapes.
-     * We need to decode it back to plain HTML.
+     * the value is wrapped in quotes, with backslash-n, backslash-t,
+     * and unicode escape sequences. We decode it back to plain HTML.
      */
     private String unquoteJs(String jsVal) {
         if (jsVal == null) return "";
