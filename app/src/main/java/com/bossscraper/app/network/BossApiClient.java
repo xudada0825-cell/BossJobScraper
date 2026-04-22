@@ -213,9 +213,9 @@ public class BossApiClient {
             }
         });
 
+        // cityId param has no effect on m.zhaopin.com; prepend city name to keyword instead
         String url = "https://m.zhaopin.com/sou/"
-                + "?kw=%E5%A4%96%E8%B4%B8"
-                + "&cityId=" + cityCode;
+                + "?kw=%E5%B9%BF%E5%B7%9E%E5%A4%96%E8%B4%B8"; // 广州外贸
         Log.d(TAG, "loadUrl: " + url);
         wv.loadUrl(url);
     }
