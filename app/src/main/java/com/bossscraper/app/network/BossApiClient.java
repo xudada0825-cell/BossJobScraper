@@ -1,8 +1,14 @@
 package com.bossscraper.app.network;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
-import android.content.SharedPreferences;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 
 import com.bossscraper.app.model.JobItem;
 import com.google.gson.JsonArray;
@@ -10,25 +16,27 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
-import java.io.IOException;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
+import java.util.Locale;
 
-import okhttp3.Call;
-import okhttp3.Callback;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.Response;
-
+/**
+ * Fetches Boss ZhiPin job listings by loading the real search page inside
+ * a hidden WebView, then extracting window.__INITIAL_STATE__ via JS.
+ * This approach bypasses all server-side anti-scraping tokens (__zp_stoken__
+ * etc.) because the browser JS engine generates them natively.
+ */
 public class BossApiClient {
 
     private static final String TAG = "BossApiClient";
 
+    // Keywords to search in order; results from all are merged
     private static final String[] KEYWORDS = {"外贸", "国际贸易", "跨境电商"};
 
-    private static final String BASE_URL =
-            "https://www.zhipin.com/wapi/zpgeek/search/joblist.json";
+    // Page load timeout: if JS hasn't fired after this many ms, try next keyword
+    private static final int TIMEOUT_MS = 12_000;
 
     public static final String[][] CITY_CODES = {
             {"全国",  "100010000"}, {"北京",  "101010100"}, {"上海",  "101020100"},
@@ -45,25 +53,20 @@ public class BossApiClient {
         void onError(String errorMsg);
     }
 
-    private final OkHttpClient httpClient;
-    private final Context context;
+    private final Context       context;
+    private final Handler       mainHandler = new Handler(Looper.getMainLooper());
+
+    // The hidden WebView is kept alive for the duration of the fetch session
+    private WebView             hiddenWebView;
+    private boolean             destroyed = false;
 
     public BossApiClient(Context context) {
         this.context = context.getApplicationContext();
-        httpClient = new OkHttpClient.Builder()
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(20, TimeUnit.SECONDS)
-                .followRedirects(true)
-                .build();
-    }
-
-    private String getSavedCookie() {
-        return context.getSharedPreferences("boss_prefs", Context.MODE_PRIVATE)
-                      .getString("cookie", null);
     }
 
     public boolean isLoggedIn() {
-        String c = getSavedCookie();
+        String c = context.getSharedPreferences("boss_prefs", Context.MODE_PRIVATE)
+                          .getString("cookie", null);
         return c != null && c.contains("wt2");
     }
 
@@ -72,141 +75,181 @@ public class BossApiClient {
                .edit().clear().apply();
     }
 
-    // Always try to fetch real data; only fall back to demo if completely blocked
+    // ── Public entry point ───────────────────────────────────────────────
+
     public void fetchForeignTradeJobs(String cityCode, FetchCallback callback) {
-        String cookie = getSavedCookie();
-        // Always attempt the real API — with or without login cookie
-        // Boss 直聘的搜索 API 对未登录用户也会返回部分数据
-        fetchKeyword(KEYWORDS[0], cityCode, cookie != null ? cookie : "",
-                new ArrayList<>(), 0, callback);
-    }
-
-    private void fetchKeyword(String keyword, String cityCode, String cookie,
-                              List<JobItem> accumulated, int keywordIndex,
-                              FetchCallback callback) {
-        String url = BASE_URL
-                + "?scene=1"
-                + "&query=" + encode(keyword)
-                + "&city=" + cityCode
-                + "&experience=&jobType=&salary=&page=1&pageSize=20&publishTime=1";
-
-        Request req = new Request.Builder()
-                .url(url)
-                .get()
-                // Full browser-like headers — required to avoid 403
-                .header("User-Agent",
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-                        "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                        "Chrome/124.0.0.0 Safari/537.36")
-                .header("Accept", "application/json, text/plain, */*")
-                .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-                .header("Accept-Encoding", "gzip, deflate, br")
-                .header("Referer",
-                        "https://www.zhipin.com/web/geek/job?query=" + encode(keyword)
-                        + "&city=" + cityCode)
-                .header("Origin", "https://www.zhipin.com")
-                .header("X-Requested-With", "XMLHttpRequest")
-                .header("sec-ch-ua", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\"")
-                .header("sec-ch-ua-mobile", "?0")
-                .header("sec-ch-ua-platform", "\"Windows\"")
-                .header("Sec-Fetch-Dest", "empty")
-                .header("Sec-Fetch-Mode", "cors")
-                .header("Sec-Fetch-Site", "same-origin")
-                .header("Cookie", cookie)
-                .build();
-
-        httpClient.newCall(req).enqueue(new Callback() {
-            @Override
-            public void onFailure(Call call, IOException e) {
-                Log.e(TAG, "onFailure: " + e.getMessage());
-                if (accumulated.isEmpty()) {
-                    callback.onError("网络请求失败：" + e.getMessage());
-                } else {
-                    callback.onSuccess(new ArrayList<>(accumulated), true);
-                }
-            }
-
-            @Override
-            public void onResponse(Call call, Response response) throws IOException {
-                int code = response.code();
-                String body = "";
-                try {
-                    if (response.body() != null) body = response.body().string();
-                } finally {
-                    response.close();
-                }
-
-                Log.d(TAG, "HTTP " + code + " keyword=" + keyword
-                        + " body_len=" + body.length());
-
-                if (code == 401 || code == 403) {
-                    Log.w(TAG, "Auth required, falling back");
-                    finishOrNext(keywordIndex, keyword, cityCode, cookie,
-                            accumulated, callback, true);
-                    return;
-                }
-
-                if (code != 200) {
-                    Log.w(TAG, "Non-200: " + code);
-                    finishOrNext(keywordIndex, keyword, cityCode, cookie,
-                            accumulated, callback, false);
-                    return;
-                }
-
-                try {
-                    List<JobItem> parsed = parseResponse(body);
-                    Log.d(TAG, "Parsed " + parsed.size() + " jobs for " + keyword);
-                    accumulated.addAll(parsed);
-                } catch (Exception e) {
-                    Log.e(TAG, "Parse error: " + e.getMessage());
-                }
-
-                finishOrNext(keywordIndex, keyword, cityCode, cookie,
-                        accumulated, callback, false);
-            }
+        mainHandler.post(() -> {
+            if (destroyed) return;
+            destroyWebView();               // clean up any previous session
+            fetchKeyword(KEYWORDS[0], cityCode, new ArrayList<>(), 0, callback);
         });
     }
 
-    private void finishOrNext(int keywordIndex, String keyword, String cityCode,
-                              String cookie, List<JobItem> accumulated,
-                              FetchCallback callback, boolean stop) {
-        int next = keywordIndex + 1;
-        if (!stop && next < KEYWORDS.length) {
-            fetchKeyword(KEYWORDS[next], cityCode, cookie, accumulated, next, callback);
-        } else {
-            if (accumulated.isEmpty()) {
-                // Truly blocked — return demo data
-                callback.onSuccess(generateDemoData(cityCode), false);
-            } else {
-                callback.onSuccess(new ArrayList<>(accumulated), true);
+    // ── Per-keyword WebView load ─────────────────────────────────────────
+
+    @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
+    private void fetchKeyword(String keyword, String cityCode,
+                              List<JobItem> accumulated, int keywordIndex,
+                              FetchCallback callback) {
+        if (destroyed) return;
+
+        hiddenWebView = new WebView(context);
+        WebSettings s = hiddenWebView.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setLoadWithOverviewMode(false);
+        s.setUserAgentString(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/124.0.0.0 Safari/537.36");
+        // Disable image/media loads to speed up scraping
+        s.setLoadsImagesAutomatically(false);
+        s.setBlockNetworkImage(true);
+        // Allow mixed content (zhipin uses https, this is fine)
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+
+        // Result holder shared between JS bridge and timeout runnable
+        final boolean[] called = {false};
+
+        JsBridge bridge = new JsBridge() {
+            @Override
+            public void onData(String json) {
+                if (called[0]) return;
+                called[0] = true;
+                mainHandler.removeCallbacksAndMessages(null);
+                Log.d(TAG, "JS bridge received " + json.length() + " chars for " + keyword);
+
+                try {
+                    List<JobItem> parsed = parseInitialState(json, cityCode);
+                    Log.d(TAG, "Parsed " + parsed.size() + " jobs for keyword=" + keyword);
+                    accumulated.addAll(parsed);
+                } catch (Exception e) {
+                    Log.e(TAG, "parse error: " + e.getMessage());
+                }
+
+                destroyWebView();
+                int next = keywordIndex + 1;
+                if (next < KEYWORDS.length) {
+                    fetchKeyword(KEYWORDS[next], cityCode, accumulated, next, callback);
+                } else {
+                    deliverResult(accumulated, callback);
+                }
             }
+        };
+
+        hiddenWebView.addJavascriptInterface(bridge, "AndroidBridge");
+
+        hiddenWebView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                Log.d(TAG, "onPageFinished: " + url);
+                // Inject JS to pull window.__INITIAL_STATE__ once DOM is ready
+                String js =
+                    "(function() {" +
+                    "  try {" +
+                    "    var state = window.__INITIAL_STATE__;" +
+                    "    if (state) {" +
+                    "      AndroidBridge.onData(JSON.stringify(state));" +
+                    "    } else {" +
+                    "      // Fallback: wait 1.5 s and retry once" +
+                    "      setTimeout(function() {" +
+                    "        var s2 = window.__INITIAL_STATE__;" +
+                    "        AndroidBridge.onData(s2 ? JSON.stringify(s2) : '{}');" +
+                    "      }, 1500);" +
+                    "    }" +
+                    "  } catch(e) {" +
+                    "    AndroidBridge.onData('{}');" +
+                    "  }" +
+                    "})();";
+                view.evaluateJavascript(js, null);
+            }
+        });
+
+        // Timeout guard
+        Runnable timeoutTask = () -> {
+            if (called[0]) return;
+            called[0] = true;
+            Log.w(TAG, "Timeout for keyword=" + keyword);
+            destroyWebView();
+            int next = keywordIndex + 1;
+            if (next < KEYWORDS.length) {
+                fetchKeyword(KEYWORDS[next], cityCode, accumulated, next, callback);
+            } else {
+                deliverResult(accumulated, callback);
+            }
+        };
+        mainHandler.postDelayed(timeoutTask, TIMEOUT_MS);
+
+        String url = "https://www.zhipin.com/web/geek/job"
+                   + "?query=" + encode(keyword)
+                   + "&city=" + cityCode
+                   + "&publishTime=1";
+        Log.d(TAG, "Loading: " + url);
+        hiddenWebView.loadUrl(url);
+    }
+
+    private void deliverResult(List<JobItem> accumulated, FetchCallback callback) {
+        if (accumulated.isEmpty()) {
+            Log.w(TAG, "All keywords returned empty, using demo data");
+            callback.onSuccess(generateDemoData(), false);
+        } else {
+            callback.onSuccess(new ArrayList<>(accumulated), true);
         }
     }
 
-    private List<JobItem> parseResponse(String json) {
+    // ── JS interface ─────────────────────────────────────────────────────
+
+    // Must be an abstract class or interface annotated with @JavascriptInterface
+    private abstract static class JsBridge {
+        @JavascriptInterface
+        public abstract void onData(String json);
+    }
+
+    // ── Parse window.__INITIAL_STATE__ ───────────────────────────────────
+
+    private List<JobItem> parseInitialState(String json, String cityCode) {
         List<JobItem> result = new ArrayList<>();
-        if (json == null || json.isEmpty()) return result;
+        if (json == null || json.equals("{}") || json.isEmpty()) return result;
+
         try {
             JsonObject root = JsonParser.parseString(json).getAsJsonObject();
-            int code = root.has("code") ? root.get("code").getAsInt() : -1;
-            if (code != 0) {
-                Log.w(TAG, "API code=" + code
-                        + " msg=" + (root.has("message") ? root.get("message") : ""));
+
+            // Typical path: __INITIAL_STATE__.zpData.jobList  (Boss web app)
+            JsonArray jobList = null;
+
+            // Try zpData -> jobList
+            if (root.has("zpData")) {
+                JsonObject zpData = root.getAsJsonObject("zpData");
+                if (zpData.has("jobList")) jobList = zpData.getAsJsonArray("jobList");
+            }
+
+            // Try geek -> jobList  (alternate structure)
+            if (jobList == null && root.has("geek")) {
+                JsonObject geek = root.getAsJsonObject("geek");
+                if (geek.has("jobList")) jobList = geek.getAsJsonArray("jobList");
+            }
+
+            // Try direct jobList at root
+            if (jobList == null && root.has("jobList")) {
+                jobList = root.getAsJsonArray("jobList");
+            }
+
+            if (jobList == null) {
+                Log.w(TAG, "No jobList found in __INITIAL_STATE__. Keys: " + root.keySet());
                 return result;
             }
-            JsonObject zpData = root.has("zpData") ? root.getAsJsonObject("zpData") : null;
-            if (zpData == null) return result;
-            JsonArray jobList = zpData.has("jobList") ? zpData.getAsJsonArray("jobList") : null;
-            if (jobList == null) return result;
+
+            String timeStr = new SimpleDateFormat("HH:mm", Locale.CHINA).format(new Date());
 
             for (JsonElement el : jobList) {
                 try {
                     JsonObject job = el.getAsJsonObject();
-                    String city     = str(job, "cityName");
-                    String area     = str(job, "areaDistrict");
-                    String biz      = str(job, "businessDistrict");
-                    String encId    = str(job, "encryptJobId");
-                    String jobUrl   = encId.isEmpty() ? "https://www.zhipin.com"
+                    String city = str(job, "cityName");
+                    String area = str(job, "areaDistrict");
+                    String biz  = str(job, "businessDistrict");
+                    String encId = str(job, "encryptJobId");
+                    String jobUrl = encId.isEmpty()
+                            ? "https://www.zhipin.com"
                             : "https://www.zhipin.com/job_detail/" + encId + ".html";
                     result.add(new JobItem(
                             str(job, "jobName"),
@@ -214,19 +257,37 @@ public class BossApiClient {
                             addr(city, area, biz),
                             city, area,
                             str(job, "salaryDesc"),
-                            "刚刚",
+                            timeStr,
                             jobUrl,
                             str(job, "brandIndustry"),
                             str(job, "brandScaleName")
                     ));
                 } catch (Exception e) {
-                    Log.w(TAG, "Skip job: " + e.getMessage());
+                    Log.w(TAG, "skip job item: " + e.getMessage());
                 }
             }
         } catch (Exception e) {
-            Log.e(TAG, "parseResponse: " + e.getMessage());
+            Log.e(TAG, "parseInitialState: " + e.getMessage());
         }
         return result;
+    }
+
+    // ── Utilities ────────────────────────────────────────────────────────
+
+    private void destroyWebView() {
+        if (hiddenWebView == null) return;
+        try {
+            hiddenWebView.stopLoading();
+            hiddenWebView.setWebViewClient(null);
+            hiddenWebView.destroy();
+        } catch (Exception ignored) {}
+        hiddenWebView = null;
+    }
+
+    public void destroy() {
+        destroyed = true;
+        mainHandler.removeCallbacksAndMessages(null);
+        destroyWebView();
     }
 
     private String addr(String city, String area, String biz) {
@@ -251,25 +312,22 @@ public class BossApiClient {
         catch (Exception e) { return s; }
     }
 
-    private List<JobItem> generateDemoData(String cityCode) {
+    private List<JobItem> generateDemoData() {
         List<JobItem> list = new ArrayList<>();
         String[][] data = {
-            {"外贸业务员",   "广州盛达进出口贸易有限公司","广州·天河区","广州","天河区","8-15K","贸易/进出口","100-499人"},
-            {"外贸跟单",     "深圳优贸供应链有限公司",   "深圳·福田区","深圳","福田区","7-12K","供应链/物流","50-99人"},
-            {"国际贸易经理", "义乌汇通进出口有限公司",   "义乌·北苑", "义乌","北苑", "15-25K","贸易/进出口","500-999人"},
-            {"跨境电商运营", "宁波跨境通电商科技有限公司","宁波·江北区","宁波","江北区","10-18K","电商/新零售","100-499人"},
-            {"外贸销售代表", "上海亚太国际贸易有限公司", "上海·浦东新区","上海","浦东新区","12-20K","贸易/进出口","200-499人"},
-            {"外贸业务经理", "青岛海盛贸易有限公司",     "青岛·市南区","青岛","市南区","15-30K","贸易/进出口","100-499人"},
-            {"外贸单证员",   "厦门远洋货运代理有限公司", "厦门·湖里区","厦门","湖里区","6-10K","货运/物流","50-99人"},
-            {"跨境贸易专员", "东莞华创跨境电商有限公司", "东莞·南城区","东莞","南城区","8-13K","电商/新零售","100-499人"},
-            {"外贸采购专员", "苏州联创国际采购中心",     "苏州·工业园区","苏州","工业园区","9-15K","贸易/进出口","500-999人"},
-            {"海外市场开发", "广州凌云科技出口有限公司", "广州·黄埔区","广州","黄埔区","15-25K","科技/互联网","200-499人"},
+            {"外贸业务员",   "广州盛达进出口贸易有限公司","广州","天河区","8-15K","贸易/进出口","100-499人"},
+            {"外贸跟单",     "深圳优贸供应链有限公司",   "深圳","福田区","7-12K","供应链/物流","50-99人"},
+            {"国际贸易经理", "义乌汇通进出口有限公司",   "义乌","北苑", "15-25K","贸易/进出口","500-999人"},
+            {"跨境电商运营", "宁波跨境通电商科技有限公司","宁波","江北区","10-18K","电商/新零售","100-499人"},
+            {"外贸销售代表", "上海亚太国际贸易有限公司", "上海","浦东新区","12-20K","贸易/进出口","200-499人"},
+            {"外贸业务经理", "青岛海盛贸易有限公司",     "青岛","市南区","15-30K","贸易/进出口","100-499人"},
+            {"外贸单证员",   "厦门远洋货运代理有限公司", "厦门","湖里区","6-10K","货运/物流","50-99人"},
+            {"跨境贸易专员", "东莞华创跨境电商有限公司", "东莞","南城区","8-13K","电商/新零售","100-499人"},
         };
-        String[] times = {"刚刚","1分钟前","2分钟前","3分钟前","4分钟前"};
-        for (int i = 0; i < data.length; i++) {
-            String[] d = data[i];
-            list.add(new JobItem(d[0],d[1],d[2],d[3],d[4],
-                    d[5],times[i%times.length],"https://www.zhipin.com/",d[6],d[7]));
+        String time = new SimpleDateFormat("HH:mm", Locale.CHINA).format(new Date());
+        for (String[] d : data) {
+            list.add(new JobItem(d[0], d[1], d[2] + "·" + d[3], d[2], d[3],
+                    d[4], time, "https://www.zhipin.com/", d[5], d[6]));
         }
         return list;
     }
