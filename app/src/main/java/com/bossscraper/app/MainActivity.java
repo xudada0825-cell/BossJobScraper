@@ -28,17 +28,23 @@ public class MainActivity extends AppCompatActivity {
     private JobViewModel viewModel;
     private JobAdapter   adapter;
 
-    private Spinner    spinnerCity;
-    private RecyclerView recyclerView;
+    // All views typed exactly as they appear in layout XML
+    private Spinner          spinnerCity;
+    private RecyclerView     recyclerView;
     private SwipeRefreshLayout swipeRefresh;
-    private ProgressBar progressBar;
-    private TextView tvLastUpdate, tvCountdown, tvJobCount;
-    private TextView tvLoginState, btnLoginStatus;
-    private TextView tvRealDataBanner, tvDemoBanner;
-    private View emptyView;
-    private androidx.appcompat.widget.AppCompatButton btnRefresh;
+    private ProgressBar      progressBar;
+    private TextView         tvLastUpdate;
+    private TextView         tvCountdown;
+    private TextView         tvJobCount;
+    private TextView         tvLoginState;
+    private TextView         btnLoginStatus;   // TextView in layout
+    private TextView         tvRealDataBanner;
+    private TextView         tvDemoBanner;
+    private View             emptyView;
+    private TextView         btnRefresh;       // use TextView for refresh too (safer)
 
     private boolean spinnerReady = false;
+    private boolean returnedFromLogin = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -53,7 +59,7 @@ public class MainActivity extends AppCompatActivity {
         setupSwipeRefresh();
         setupButtons();
 
-        // 首次加载（只在 onCreate 触发，不在 onResume）
+        // First load
         if (savedInstanceState == null) {
             triggerRefresh();
         }
@@ -68,13 +74,18 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        // 只更新 UI 状态，不触发任何网络请求
         boolean loggedIn = getSharedPreferences("boss_prefs", MODE_PRIVATE)
                 .getBoolean("logged_in", false);
         updateLoginStateUI(loggedIn);
+
+        // If we just came back from login, do one refresh
+        if (returnedFromLogin) {
+            returnedFromLogin = false;
+            triggerRefresh();
+        }
     }
 
-    // ── 初始化 ──────────────────────────────────────────────
+    // ── Views ────────────────────────────────────────────────────────────
 
     private void initViews() {
         spinnerCity      = findViewById(R.id.spinnerCity);
@@ -89,30 +100,35 @@ public class MainActivity extends AppCompatActivity {
         tvRealDataBanner = findViewById(R.id.tvRealDataBanner);
         tvDemoBanner     = findViewById(R.id.tvDemoBanner);
         emptyView        = findViewById(R.id.emptyView);
-        btnRefresh       = findViewById(R.id.btnRefresh);
+        // btnRefresh is AppCompatButton in layout — find as View first, set click listener
+        View refreshBtn  = findViewById(R.id.btnRefresh);
+        if (refreshBtn != null) refreshBtn.setOnClickListener(v -> triggerRefresh());
     }
+
+    // ── Observers ────────────────────────────────────────────────────────
 
     private void observeViewModel() {
         viewModel.getFilteredJobs().observe(this, jobs -> {
             if (jobs != null && !jobs.isEmpty()) {
                 adapter.setJobs(jobs);
-                recyclerView.setVisibility(View.VISIBLE);
-                emptyView.setVisibility(View.GONE);
-                tvJobCount.setText(jobs.size() + " 条");
+                if (recyclerView != null) recyclerView.setVisibility(View.VISIBLE);
+                if (emptyView    != null) emptyView.setVisibility(View.GONE);
+                if (tvJobCount   != null) tvJobCount.setText(jobs.size() + " 条");
             } else {
-                recyclerView.setVisibility(View.GONE);
-                emptyView.setVisibility(View.VISIBLE);
-                tvJobCount.setText("");
+                adapter.setJobs(null);
+                if (recyclerView != null) recyclerView.setVisibility(View.GONE);
+                if (emptyView    != null) emptyView.setVisibility(View.VISIBLE);
+                if (tvJobCount   != null) tvJobCount.setText("");
             }
-            swipeRefresh.setRefreshing(false);
+            if (swipeRefresh != null) swipeRefresh.setRefreshing(false);
         });
 
         viewModel.getIsLoading().observe(this, loading -> {
             if (loading == null) return;
-            progressBar.setVisibility(loading ? View.VISIBLE : View.GONE);
-            btnRefresh.setEnabled(!loading);
-            btnRefresh.setText(loading ? "加载中..." : "立即刷新");
-            if (!loading) swipeRefresh.setRefreshing(false);
+            if (progressBar  != null)
+                progressBar.setVisibility(loading ? View.VISIBLE : View.GONE);
+            if (!loading && swipeRefresh != null)
+                swipeRefresh.setRefreshing(false);
         });
 
         viewModel.getErrorMessage().observe(this, msg -> {
@@ -120,16 +136,18 @@ public class MainActivity extends AppCompatActivity {
             Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
             if (msg.contains("登录已过期")) {
                 getSharedPreferences("boss_prefs", MODE_PRIVATE)
-                    .edit().putBoolean("logged_in", false).apply();
+                        .edit().putBoolean("logged_in", false).apply();
                 updateLoginStateUI(false);
             }
         });
 
-        viewModel.getLastUpdateTime().observe(this, time ->
-                tvLastUpdate.setText("最后更新：" + (time != null ? time : "--")));
+        viewModel.getLastUpdateTime().observe(this, time -> {
+            if (tvLastUpdate != null)
+                tvLastUpdate.setText("最后更新：" + (time != null ? time : "--"));
+        });
 
         viewModel.getCountdownSeconds().observe(this, seconds -> {
-            if (seconds == null) return;
+            if (tvCountdown == null || seconds == null) return;
             int min = seconds / 60, sec = seconds % 60;
             tvCountdown.setText(
                     String.format(Locale.CHINA, "下次刷新：%02d:%02d", min, sec));
@@ -142,15 +160,17 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    // ── Setup ────────────────────────────────────────────────────────────
+
     private void setupCitySpinner() {
+        if (spinnerCity == null) return;
         String[] cityNames = new String[BossApiClient.CITY_CODES.length];
         for (int i = 0; i < BossApiClient.CITY_CODES.length; i++) {
             cityNames[i] = BossApiClient.CITY_CODES[i][0];
         }
         ArrayAdapter<String> cityAdapter = new ArrayAdapter<>(
                 this, android.R.layout.simple_spinner_item, cityNames);
-        cityAdapter.setDropDownViewResource(
-                android.R.layout.simple_spinner_dropdown_item);
+        cityAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spinnerCity.setAdapter(cityAdapter);
 
         spinnerCity.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
@@ -167,44 +187,51 @@ public class MainActivity extends AppCompatActivity {
 
     private void setupRecyclerView() {
         adapter = new JobAdapter(this);
-        recyclerView.setLayoutManager(new LinearLayoutManager(this));
-        recyclerView.setAdapter(adapter);
+        if (recyclerView != null) {
+            recyclerView.setLayoutManager(new LinearLayoutManager(this));
+            recyclerView.setAdapter(adapter);
+        }
     }
 
     private void setupSwipeRefresh() {
-        swipeRefresh.setColorSchemeResources(R.color.purple_700);
+        if (swipeRefresh == null) return;
         swipeRefresh.setOnRefreshListener(this::triggerRefresh);
     }
 
     private void setupButtons() {
-        btnRefresh.setOnClickListener(v -> triggerRefresh());
+        if (btnLoginStatus != null) {
+            btnLoginStatus.setOnClickListener(v -> {
+                if (viewModel.isLoggedIn()) {
+                    new AlertDialog.Builder(this)
+                            .setTitle("退出登录")
+                            .setMessage("确定退出登录？退出后将显示演示数据。")
+                            .setPositiveButton("退出", (d, w) -> {
+                                viewModel.logout();
+                                getSharedPreferences("boss_prefs", MODE_PRIVATE)
+                                        .edit().putBoolean("logged_in", false).apply();
+                                updateLoginStateUI(false);
+                            })
+                            .setNegativeButton("取消", null)
+                            .show();
+                } else {
+                    returnedFromLogin = true;
+                    startActivity(new Intent(this, LoginActivity.class));
+                }
+            });
+        }
 
-        btnLoginStatus.setOnClickListener(v -> {
-            if (viewModel.isLoggedIn()) {
-                new AlertDialog.Builder(this)
-                        .setTitle("退出登录")
-                        .setMessage("确定退出登录？退出后将显示演示数据。")
-                        .setPositiveButton("退出", (d, w) -> {
-                            viewModel.logout();
-                            getSharedPreferences("boss_prefs", MODE_PRIVATE)
-                                .edit().putBoolean("logged_in", false).apply();
-                            updateLoginStateUI(false);
-                        })
-                        .setNegativeButton("取消", null)
-                        .show();
-            } else {
+        if (tvDemoBanner != null) {
+            tvDemoBanner.setOnClickListener(v -> {
+                returnedFromLogin = true;
                 startActivity(new Intent(this, LoginActivity.class));
-            }
-        });
-
-        tvDemoBanner.setOnClickListener(v ->
-                startActivity(new Intent(this, LoginActivity.class)));
+            });
+        }
     }
 
-    // ── 工具方法 ─────────────────────────────────────────────
+    // ── Helpers ──────────────────────────────────────────────────────────
 
     private void triggerRefresh() {
-        if (viewModel == null) return;
+        if (viewModel == null || spinnerCity == null) return;
         int pos = spinnerCity.getSelectedItemPosition();
         if (pos < 0 || pos >= BossApiClient.CITY_CODES.length) pos = 0;
         viewModel.fetchJobs(
@@ -213,17 +240,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updateLoginStateUI(boolean loggedIn) {
-        if (btnLoginStatus == null || tvLoginState == null) return;
-        if (loggedIn) {
-            btnLoginStatus.setText("退出登录");
-            tvLoginState.setText("已登录 · 获取真实数据");
-            if (tvRealDataBanner != null) tvRealDataBanner.setVisibility(View.VISIBLE);
-            if (tvDemoBanner != null)     tvDemoBanner.setVisibility(View.GONE);
-        } else {
-            btnLoginStatus.setText("登录");
-            tvLoginState.setText("未登录 · 显示演示数据");
-            if (tvRealDataBanner != null) tvRealDataBanner.setVisibility(View.GONE);
-            if (tvDemoBanner != null)     tvDemoBanner.setVisibility(View.VISIBLE);
-        }
+        if (btnLoginStatus != null)
+            btnLoginStatus.setText(loggedIn ? "退出登录" : "登录");
+        if (tvLoginState != null)
+            tvLoginState.setText(loggedIn ? "已登录 · 获取真实数据" : "未登录 · 显示演示数据");
+        if (tvRealDataBanner != null)
+            tvRealDataBanner.setVisibility(loggedIn ? View.VISIBLE : View.GONE);
+        if (tvDemoBanner != null)
+            tvDemoBanner.setVisibility(loggedIn ? View.GONE : View.VISIBLE);
     }
 }
