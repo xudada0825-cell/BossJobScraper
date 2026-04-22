@@ -63,6 +63,13 @@ public class JobViewModel extends AndroidViewModel {
     // ── Actions ──────────────────────────────────────────────────────────
 
     public void fetchJobs(String code, String name) {
+        boolean cityChanged = !code.equals(cityCode);
+        // If city changed, cancel the in-flight request and clear stale data
+        if (cityChanged) {
+            fetching = false;
+            api.cancelPending();
+            filteredJobs.postValue(new ArrayList<>());
+        }
         if (fetching) return;
         fetching = true;
         cityCode = code;
