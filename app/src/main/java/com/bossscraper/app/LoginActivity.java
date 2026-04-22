@@ -155,13 +155,14 @@ public class LoginActivity extends AppCompatActivity {
 
                 Toast.makeText(this, "登录成功！", Toast.LENGTH_SHORT).show();
 
-                // 先销毁 WebView 再跳转，避免内存泄漏和回调问题
-                destroyWebView();
+                // 把登录 WebView 交给 BossApiClient 复用（保留 session/cookie）
+                // 不在这里销毁它，由 BossApiClient 在抓完数据后自行管理
+                com.bossscraper.app.network.BossApiClient.setSharedWebView(
+                        webView, webView.getUrl());
+                webView = null; // 防止 onDestroy 里再次销毁
 
-                // 直接用 startActivity 跳主页，不传 extra
                 android.content.Intent intent =
                         new android.content.Intent(this, MainActivity.class);
-                // FLAG_ACTIVITY_CLEAR_TOP：如果 MainActivity 已存在则复用
                 intent.setFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
                               | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP);
                 startActivity(intent);
