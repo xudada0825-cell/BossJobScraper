@@ -132,5 +132,6 @@ public class JobViewModel extends AndroidViewModel {
     protected void onCleared() {
         super.onCleared();
         stopTimers();
+        api.destroy();
     }
 }
