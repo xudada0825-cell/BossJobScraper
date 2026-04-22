@@ -20,32 +20,39 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class JobViewModel extends AndroidViewModel {
 
     private static final String TAG = "JobViewModel";
-    private static final long AUTO_REFRESH_INTERVAL = 5 * 60 * 1000L;
+    private static final int AUTO_REFRESH_SECONDS = 300; // 5 minutes
 
-    private final MutableLiveData<List<JobItem>> filteredJobs = new MutableLiveData<>(new ArrayList<>());
-    private final MutableLiveData<Boolean>       isLoading    = new MutableLiveData<>(false);
-    private final MutableLiveData<String>        errorMessage = new MutableLiveData<>();
-    private final MutableLiveData<String>        lastUpdateTime = new MutableLiveData<>("--");
-    private final MutableLiveData<Integer>       countdownSeconds = new MutableLiveData<>(300);
-    private final MutableLiveData<Boolean>       isRealData   = new MutableLiveData<>(false);
+    private final MutableLiveData<List<JobItem>> filteredJobs    = new MutableLiveData<>(new ArrayList<>());
+    private final MutableLiveData<Boolean>       isLoading       = new MutableLiveData<>(false);
+    private final MutableLiveData<String>        errorMessage    = new MutableLiveData<>();
+    private final MutableLiveData<String>        lastUpdateTime  = new MutableLiveData<>("--");
+    private final MutableLiveData<Integer>       countdownSeconds = new MutableLiveData<>(AUTO_REFRESH_SECONDS);
+    private final MutableLiveData<Boolean>       isRealData      = new MutableLiveData<>(false);
 
     private final BossApiClient apiClient;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
+    // Use AtomicInteger for countdown so Timer thread never calls LiveData.getValue()
+    private final AtomicInteger countdownAtom = new AtomicInteger(AUTO_REFRESH_SECONDS);
+
     private String currentCityCode = "100010000";
     private String currentCityName = "全国";
+
     private Timer autoRefreshTimer;
     private Timer countdownTimer;
 
     public JobViewModel(@NonNull Application application) {
         super(application);
         apiClient = new BossApiClient(application);
-        startAutoRefresh();
+        startTimers();
     }
+
+    // ── Public API ───────────────────────────────────────────────────────
 
     public LiveData<List<JobItem>> getFilteredJobs()    { return filteredJobs; }
     public LiveData<Boolean>       getIsLoading()        { return isLoading; }
@@ -56,9 +63,10 @@ public class JobViewModel extends AndroidViewModel {
     public boolean                 isLoggedIn()          { return apiClient.isLoggedIn(); }
 
     public void fetchJobs(String cityCode, String cityName) {
-        this.currentCityCode = cityCode;
-        this.currentCityName = cityName;
+        currentCityCode = cityCode;
+        currentCityName = cityName;
 
+        // postValue is safe from any thread
         isLoading.postValue(true);
         errorMessage.postValue(null);
 
@@ -89,37 +97,45 @@ public class JobViewModel extends AndroidViewModel {
         fetchJobs(currentCityCode, currentCityName);
     }
 
-    private void startAutoRefresh() {
-        stopAutoRefresh();
+    // ── Timers ───────────────────────────────────────────────────────────
+
+    private void startTimers() {
+        stopTimers();
+
+        // Auto-refresh every 5 minutes
         autoRefreshTimer = new Timer("AutoRefresh", true);
         autoRefreshTimer.scheduleAtFixedRate(new TimerTask() {
             @Override
             public void run() {
+                // Post to main thread — fetchJobs itself is thread-safe via postValue
                 mainHandler.post(() -> fetchJobs(currentCityCode, currentCityName));
             }
-        }, AUTO_REFRESH_INTERVAL, AUTO_REFRESH_INTERVAL);
-        startCountdownTimer();
-    }
+        }, AUTO_REFRESH_SECONDS * 1000L, AUTO_REFRESH_SECONDS * 1000L);
 
-    private void startCountdownTimer() {
-        if (countdownTimer != null) countdownTimer.cancel();
+        // Countdown ticker — uses AtomicInteger, never touches LiveData.getValue()
         countdownTimer = new Timer("Countdown", true);
         countdownTimer.scheduleAtFixedRate(new TimerTask() {
             @Override
             public void run() {
-                Integer cur = countdownSeconds.getValue();
-                if (cur != null && cur > 0) countdownSeconds.postValue(cur - 1);
+                int remaining = countdownAtom.decrementAndGet();
+                if (remaining < 0) {
+                    countdownAtom.set(0);
+                    remaining = 0;
+                }
+                // postValue is safe from any thread
+                countdownSeconds.postValue(remaining);
             }
         }, 1000, 1000);
     }
 
     private void resetCountdown() {
-        countdownSeconds.postValue(300);
+        countdownAtom.set(AUTO_REFRESH_SECONDS);
+        countdownSeconds.postValue(AUTO_REFRESH_SECONDS);
     }
 
-    private void stopAutoRefresh() {
+    private void stopTimers() {
         if (autoRefreshTimer != null) { autoRefreshTimer.cancel(); autoRefreshTimer = null; }
-        if (countdownTimer != null)   { countdownTimer.cancel();   countdownTimer = null;   }
+        if (countdownTimer   != null) { countdownTimer.cancel();   countdownTimer   = null; }
     }
 
     private String getCurrentTimeStr() {
@@ -129,6 +145,6 @@ public class JobViewModel extends AndroidViewModel {
     @Override
     protected void onCleared() {
         super.onCleared();
-        stopAutoRefresh();
+        stopTimers();
     }
 }
