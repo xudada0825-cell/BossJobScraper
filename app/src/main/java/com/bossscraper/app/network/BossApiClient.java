@@ -5,16 +5,13 @@ import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
-import android.webkit.JavascriptInterface;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import com.bossscraper.app.model.JobItem;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -22,27 +19,48 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * Fetches jobs by reusing the SAME WebView that was used for login,
- * or creating a new one for guest access. The key insight: after a
- * real user login in WebView, all session cookies are already present.
- * We inject a same-origin fetch() via JS so all tokens are handled by
- * the browser engine automatically.
+ * Fetches real job listings from Zhaopin mobile site (m.zhaopin.com).
+ * The mobile site renders job cards server-side (SSR) in the HTML,
+ * so we can extract them from the page source without any API calls.
+ *
+ * Data flow:
+ *   1. Load m.zhaopin.com/sou/?kw=外贸&cityId=XXX in a hidden WebView
+ *   2. onPageFinished -> inject JS to get document.documentElement.outerHTML
+ *   3. Parse HTML via regex to extract job cards
+ *   4. Return results via callback
  */
 public class BossApiClient {
 
     private static final String TAG        = "BossApiClient";
-    private static final int    TIMEOUT_MS = 25_000;
+    private static final int    TIMEOUT_MS = 20_000;
 
+    // Zhaopin city IDs
     public static final String[][] CITY_CODES = {
-            {"全国",  "100010000"}, {"北京",  "101010100"}, {"上海",  "101020100"},
-            {"广州",  "101280100"}, {"深圳",  "101280600"}, {"杭州",  "101210100"},
-            {"成都",  "101270100"}, {"武汉",  "101200100"}, {"南京",  "101190100"},
-            {"西安",  "101110100"}, {"苏州",  "101190400"}, {"宁波",  "101210400"},
-            {"青岛",  "101120200"}, {"天津",  "101030100"}, {"重庆",  "101040100"},
-            {"厦门",  "101230200"}, {"郑州",  "101180100"}, {"福州",  "101230100"},
-            {"长沙",  "101250100"}, {"东莞",  "101281600"}, {"义乌",  "101210600"},
+            {"全国",  "530"},
+            {"北京",  "2"},
+            {"上海",  "10"},
+            {"广州",  "763"},
+            {"深圳",  "765"},
+            {"杭州",  "66"},
+            {"成都",  "801"},
+            {"武汉",  "736"},
+            {"南京",  "73"},
+            {"西安",  "854"},
+            {"苏州",  "75"},
+            {"宁波",  "743"},
+            {"青岛",  "576"},
+            {"天津",  "3"},
+            {"重庆",  "4"},
+            {"厦门",  "745"},
+            {"郑州",  "763"},
+            {"福州",  "746"},
+            {"长沙",  "749"},
+            {"东莞",  "769"},
+            {"义乌",  "781"},
     };
 
     public interface FetchCallback {
@@ -52,41 +70,14 @@ public class BossApiClient {
 
     private final Context appCtx;
     private final Handler main = new Handler(Looper.getMainLooper());
-
-    // The shared WebView — set from LoginActivity after successful login
-    private static WebView sharedWebView;
-    private static String  sharedWebViewUrl; // last URL loaded in sharedWebView
-
     private boolean destroyed = false;
 
     public BossApiClient(Context ctx) {
         this.appCtx = ctx.getApplicationContext();
     }
 
-    /** Called by LoginActivity after login succeeds, before destroying the WebView. */
-    public static void setSharedWebView(WebView wv, String currentUrl) {
-        sharedWebView    = wv;
-        sharedWebViewUrl = currentUrl;
-        Log.d("BossApiClient", "sharedWebView set, url=" + currentUrl);
-    }
-
-    public static void clearSharedWebView() {
-        sharedWebView    = null;
-        sharedWebViewUrl = null;
-    }
-
-    public boolean isLoggedIn() {
-        String c = appCtx.getSharedPreferences("boss_prefs", Context.MODE_PRIVATE)
-                         .getString("cookie", null);
-        return c != null && c.contains("wt2");
-    }
-
-    public void logout() {
-        appCtx.getSharedPreferences("boss_prefs", Context.MODE_PRIVATE)
-              .edit().clear().apply();
-        clearSharedWebView();
-    }
-
+    public boolean isLoggedIn() { return false; } // no login needed
+    public void logout() {}
     public void destroy() {
         destroyed = true;
         main.removeCallbacksAndMessages(null);
@@ -97,237 +88,187 @@ public class BossApiClient {
     public void fetchForeignTradeJobs(String cityCode, FetchCallback cb) {
         main.post(() -> {
             if (destroyed) return;
-            if (sharedWebView != null) {
-                fetchViaSharedWebView(cityCode, cb);
-            } else {
-                fetchViaNewWebView(cityCode, cb);
-            }
+            loadAndParse(cityCode, cb);
         });
     }
 
-    // ── Strategy A: reuse the login WebView (has full session) ───────────
+    // ── WebView load + HTML extraction ───────────────────────────────────
 
-    private void fetchViaSharedWebView(String cityCode, FetchCallback cb) {
-        WebView wv = sharedWebView;
-        AtomicBoolean done = new AtomicBoolean(false);
+    @SuppressLint("SetJavaScriptEnabled")
+    private void loadAndParse(String cityCode, FetchCallback cb) {
+        final WebView wv = new WebView(appCtx);
+        final AtomicBoolean done = new AtomicBoolean(false);
 
-        // Add JS bridge temporarily
-        String bridgeName = "AndroidBridge" + System.currentTimeMillis();
-
-        Object bridge = new Object() {
-            @JavascriptInterface
-            public void onResult(String json) {
-                if (done.getAndSet(true)) return;
-                main.removeCallbacksAndMessages(null);
-                Log.d(TAG, "sharedWV result len=" + json.length());
-                List<JobItem> jobs = parseJoblist(json);
-                Log.d(TAG, "parsed=" + jobs.size());
-                main.post(() -> {
-                    if (jobs.isEmpty()) cb.onSuccess(generateDemo(), false);
-                    else cb.onSuccess(jobs, true);
-                });
-            }
-            @JavascriptInterface
-            public void onError(String msg) {
-                if (done.getAndSet(true)) return;
-                main.removeCallbacksAndMessages(null);
-                Log.e(TAG, "sharedWV JS error: " + msg);
-                main.post(() -> cb.onSuccess(generateDemo(), false));
-            }
-        };
-
-        wv.addJavascriptInterface(bridge, bridgeName);
-
-        main.postDelayed(() -> {
-            if (done.getAndSet(true)) return;
-            Log.w(TAG, "sharedWV timeout, falling back to new WebView");
-            fetchViaNewWebView(cityCode, cb);
-        }, TIMEOUT_MS);
-
-        // If the shared WebView is already on zhipin.com, inject fetch directly.
-        // Otherwise navigate to search page first.
-        String currentUrl = sharedWebViewUrl != null ? sharedWebViewUrl : "";
-        if (currentUrl.contains("zhipin.com")) {
-            injectFetch(wv, bridgeName, cityCode);
-        } else {
-            // Need to navigate first — wait for onPageFinished
-            wv.setWebViewClient(new WebViewClient() {
-                @Override
-                public void onPageFinished(WebView view, String url) {
-                    if (done.get()) return;
-                    sharedWebViewUrl = url;
-                    if (url != null && url.contains("zhipin.com")) {
-                        injectFetch(view, bridgeName, cityCode);
-                    }
-                }
-            });
-            wv.loadUrl("https://www.zhipin.com/web/geek/job?query=%E5%A4%96%E8%B4%B8&city=" + cityCode);
-        }
-    }
-
-    // ── Strategy B: new WebView (for non-logged-in, loads page fresh) ───
-
-    @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
-    private void fetchViaNewWebView(String cityCode, FetchCallback cb) {
-        WebView wv = new WebView(appCtx);
         WebSettings s = wv.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setLoadsImagesAutomatically(false);
         s.setBlockNetworkImage(true);
+        // Mobile UA - zhaopin serves SSR HTML to mobile browsers
         s.setUserAgentString(
                 "Mozilla/5.0 (Linux; Android 14; Pixel 7) " +
                 "AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/124.0.6367.82 Mobile Safari/537.36");
 
-        AtomicBoolean done = new AtomicBoolean(false);
-
-        Object bridge = new Object() {
-            @JavascriptInterface
-            public void onResult(String json) {
-                if (done.getAndSet(true)) return;
-                main.removeCallbacksAndMessages(null);
-                Log.d(TAG, "newWV result len=" + json.length());
-                List<JobItem> jobs = parseJoblist(json);
-                Log.d(TAG, "parsed=" + jobs.size());
-                main.post(() -> {
-                    destroyWv(wv);
-                    if (jobs.isEmpty()) cb.onSuccess(generateDemo(), false);
-                    else cb.onSuccess(jobs, true);
-                });
-            }
-            @JavascriptInterface
-            public void onError(String msg) {
-                if (done.getAndSet(true)) return;
-                main.removeCallbacksAndMessages(null);
-                Log.e(TAG, "newWV JS error: " + msg);
-                main.post(() -> { destroyWv(wv); cb.onSuccess(generateDemo(), false); });
-            }
-        };
-        wv.addJavascriptInterface(bridge, "AndroidBridge");
-
-        main.postDelayed(() -> {
+        Runnable timeoutTask = () -> {
             if (done.getAndSet(true)) return;
-            Log.w(TAG, "newWV timeout");
-            main.post(() -> { destroyWv(wv); cb.onSuccess(generateDemo(), false); });
-        }, TIMEOUT_MS);
+            Log.w(TAG, "timeout");
+            destroyWv(wv);
+            cb.onError("加载超时，请检查网络");
+        };
+        main.postDelayed(timeoutTask, TIMEOUT_MS);
 
         wv.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
                 if (done.get()) return;
-                Log.d(TAG, "newWV onPageFinished: " + url);
-                injectFetch(view, "AndroidBridge", cityCode);
+                Log.d(TAG, "onPageFinished: " + url);
+
+                // Extract full HTML via JS and send back to Java
+                view.evaluateJavascript(
+                    "(function(){ return document.documentElement.outerHTML; })()",
+                    html -> {
+                        if (done.getAndSet(true)) return;
+                        main.removeCallbacks(timeoutTask);
+                        destroyWv(wv);
+
+                        // evaluateJavascript returns a JSON string (quoted, escaped)
+                        String decoded = unquoteJs(html);
+                        Log.d(TAG, "HTML length=" + decoded.length());
+
+                        List<JobItem> jobs = parseZhaopinHtml(decoded);
+                        Log.d(TAG, "parsed jobs=" + jobs.size());
+
+                        if (jobs.isEmpty()) {
+                            cb.onError("暂无数据，请稍后重试");
+                        } else {
+                            cb.onSuccess(jobs, true);
+                        }
+                    });
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest req,
+                                        WebResourceError err) {
+                if (req.isForMainFrame()) {
+                    Log.e(TAG, "WebView error: " + (err != null ? err.getDescription() : "?"));
+                }
             }
         });
 
-        String url = "https://www.zhipin.com/web/geek/job"
-                + "?query=%E5%A4%96%E8%B4%B8&city=" + cityCode + "&publishTime=1";
-        Log.d(TAG, "newWV loadUrl: " + url);
+        String url = "https://m.zhaopin.com/sou/"
+                + "?kw=%E5%A4%96%E8%B4%B8"
+                + "&cityId=" + cityCode;
+        Log.d(TAG, "loadUrl: " + url);
         wv.loadUrl(url);
     }
 
-    // ── Inject same-origin fetch() into the running page ────────────────
+    // ── HTML parser ──────────────────────────────────────────────────────
 
-    private void injectFetch(WebView wv, String bridgeName, String cityCode) {
-        String apiUrl = "https://www.zhipin.com/wapi/zpgeek/search/joblist.json"
-                + "?scene=1&query=%E5%A4%96%E8%B4%B8&city=" + cityCode
-                + "&publishTime=1&page=1&pageSize=30";
-
-        String js =
-            "(function(){\n" +
-            "  fetch('" + apiUrl + "',{\n" +
-            "    credentials:'include',\n" +
-            "    headers:{'Accept':'application/json','X-Requested-With':'XMLHttpRequest'}\n" +
-            "  })\n" +
-            "  .then(function(r){return r.text();})\n" +
-            "  .then(function(t){" + bridgeName + ".onResult(t);})\n" +
-            "  .catch(function(e){" + bridgeName + ".onError(e.toString());});\n" +
-            "})();";
-
-        Log.d(TAG, "injectFetch apiUrl=" + apiUrl);
-        wv.evaluateJavascript(js, null);
-    }
-
-    // ── Parse response ───────────────────────────────────────────────────
-
-    private List<JobItem> parseJoblist(String json) {
+    /**
+     * Parses Zhaopin mobile HTML job cards.
+     *
+     * Each card has a job link followed by text in this order:
+     *   JOB_NAME  SALARY  EXP  EDU  [TAGS]  COMPANY  INDUSTRY  [SCALE]  CITY  [DISTRICT]
+     */
+    private List<JobItem> parseZhaopinHtml(String html) {
         List<JobItem> out = new ArrayList<>();
-        if (json == null || json.isEmpty()) return out;
-        try {
-            JsonObject root = JsonParser.parseString(json).getAsJsonObject();
-            int code = root.has("code") ? root.get("code").getAsInt() : -1;
-            if (code != 0) {
-                Log.w(TAG, "API code=" + code + " msg="
-                        + (root.has("message") ? root.get("message").getAsString() : "?"));
-                return out;
-            }
-            JsonObject zpData = root.has("zpData") ? root.getAsJsonObject("zpData") : null;
-            if (zpData == null) return out;
-            JsonArray list = zpData.has("jobList") ? zpData.getAsJsonArray("jobList") : null;
-            if (list == null) return out;
+        if (html == null || html.length() < 100) return out;
 
-            String time = new SimpleDateFormat("HH:mm", Locale.CHINA).format(new Date());
-            for (JsonElement el : list) {
-                try {
-                    JsonObject j  = el.getAsJsonObject();
-                    String city   = str(j, "cityName");
-                    String area   = str(j, "areaDistrict");
-                    String biz    = str(j, "businessDistrict");
-                    String encId  = str(j, "encryptJobId");
-                    String jobUrl = encId.isEmpty() ? "https://www.zhipin.com"
-                            : "https://www.zhipin.com/job_detail/" + encId + ".html";
-                    out.add(new JobItem(
-                            str(j, "jobName"), str(j, "brandName"),
-                            addr(city, area, biz), city, area,
-                            str(j, "salaryDesc"), time, jobUrl,
-                            str(j, "brandIndustry"), str(j, "brandScaleName")));
-                } catch (Exception e) {
-                    Log.w(TAG, "skip: " + e.getMessage());
-                }
+        // Find all job card anchors
+        Pattern urlPat = Pattern.compile(
+                "href=\"(https://m\\.zhaopin\\.com/jobs/[^\"]+)\"[^>]*>([^<]{2,60})</a>");
+        Matcher m = urlPat.matcher(html);
+
+        String time = new SimpleDateFormat("HH:mm", Locale.CHINA).format(new Date());
+
+        while (m.find()) {
+            String jobUrl  = m.group(1);
+            String jobName = m.group(2).trim();
+            if (jobName.isEmpty()) continue;
+
+            // Grab the next 600 chars of text content after the link
+            int end = m.end();
+            String chunk = html.substring(end, Math.min(end + 600, html.length()));
+            // Strip HTML tags and collapse whitespace
+            String text = chunk.replaceAll("<[^>]+>", " ")
+                               .replaceAll("\\s+", " ")
+                               .trim();
+
+            // Salary: digits-digits元 or 万 pattern
+            String salary = extract(text,
+                    "(\\d[\\d\\-万]+元[^\\s]*)");
+
+            // Company: look for 有限|集团|公司 etc.
+            String company = extract(text,
+                    "([^\\s]{2,25}(?:有限公司|集团|股份|工厂|贸易公司|进出口公司|电商))");
+            if (company.isEmpty()) {
+                // Fallback: long token after edu keywords
+                company = extract(text,
+                        "(?:本科|大专|硕士|高中|不限)\\s+([^\\s]{3,25})");
             }
-        } catch (Exception e) {
-            Log.e(TAG, "parse: " + e.getMessage());
+
+            // City: known city names
+            String city = extract(text,
+                    "(北京|上海|广州|深圳|杭州|成都|武汉|南京|西安|苏州|宁波|青岛|天津|重庆|厦门|郑州|福州|长沙|东莞|义乌|全国)");
+
+            // District: token after city name
+            String district = "";
+            if (!city.isEmpty()) {
+                district = extract(text.substring(text.indexOf(city) + city.length()),
+                        "^\\s+([^\\s]{2,6})");
+            }
+
+            // Address display
+            String addr = city;
+            if (!district.isEmpty()) addr += " · " + district;
+            if (addr.isEmpty()) addr = "地址待定";
+
+            out.add(new JobItem(
+                    jobName,
+                    company.isEmpty() ? "招聘企业" : company,
+                    addr, city, district,
+                    salary.isEmpty() ? "薪资面议" : salary,
+                    time,
+                    jobUrl,
+                    "贸易/进出口",
+                    ""));
         }
         return out;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
+    private String extract(String text, String regex) {
+        Matcher m = Pattern.compile(regex).matcher(text);
+        return m.find() ? m.group(1).trim() : "";
+    }
+
+    /**
+     * evaluateJavascript returns a JSON-encoded string:
+     * the value is wrapped in quotes, with \n \t \uXXXX escapes.
+     * We need to decode it back to plain HTML.
+     */
+    private String unquoteJs(String jsVal) {
+        if (jsVal == null) return "";
+        // Remove surrounding quotes if present
+        if (jsVal.startsWith("\"") && jsVal.endsWith("\"")) {
+            jsVal = jsVal.substring(1, jsVal.length() - 1);
+        }
+        // Unescape common sequences
+        return jsVal
+                .replace("\\n", "\n")
+                .replace("\\t", "\t")
+                .replace("\\r", "")
+                .replace("\\\"", "\"")
+                .replace("\\'", "'")
+                .replace("\\\\", "\\")
+                .replaceAll("\\\\u([0-9a-fA-F]{4})", "?"); // unicode escapes -> placeholder
+    }
+
     private void destroyWv(WebView wv) {
         if (wv == null) return;
         try { wv.stopLoading(); wv.setWebViewClient(null); wv.destroy(); }
         catch (Exception ignored) {}
-    }
-
-    private String addr(String city, String area, String biz) {
-        StringBuilder sb = new StringBuilder();
-        if (!mt(city)) sb.append(city);
-        if (!mt(area)) { if (sb.length()>0) sb.append(" · "); sb.append(area); }
-        if (!mt(biz))  { if (sb.length()>0) sb.append(" · "); sb.append(biz); }
-        return sb.length()>0 ? sb.toString() : "地址未知";
-    }
-
-    private boolean mt(String s) { return s==null||s.isEmpty(); }
-
-    private String str(JsonObject o, String k) {
-        try { JsonElement e=o.get(k); return e!=null&&!e.isJsonNull()?e.getAsString():""; }
-        catch(Exception x){return "";}
-    }
-
-    private List<JobItem> generateDemo() {
-        List<JobItem> list = new ArrayList<>();
-        String t = new SimpleDateFormat("HH:mm", Locale.CHINA).format(new Date());
-        String[][] d = {
-            {"外贸业务员",   "广州盛达进出口", "广州", "天河",  "8-15K",  "贸易",   "100-499人"},
-            {"外贸跟单",     "深圳优贸供应链", "深圳", "福田",  "7-12K",  "供应链", "50-99人"},
-            {"国际贸易经理", "义乌汇通进出口", "义乌", "北苑",  "15-25K", "贸易",   "500-999人"},
-            {"跨境电商运营", "宁波跨境通电商", "宁波", "江北",  "10-18K", "电商",   "100-499人"},
-            {"外贸销售代表", "上海亚太国际",   "上海", "浦东",  "12-20K", "贸易",   "200-499人"},
-        };
-        for (String[] r : d)
-            list.add(new JobItem(r[0],r[1],r[2]+"·"+r[3],r[2],r[3],r[4],t,
-                    "https://www.zhipin.com/",r[5],r[6]));
-        return list;
     }
 }
