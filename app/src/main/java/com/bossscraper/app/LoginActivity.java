@@ -21,7 +21,7 @@ import androidx.appcompat.app.AppCompatActivity;
 public class LoginActivity extends AppCompatActivity {
 
     private static final String BOSS_LOGIN_URL = "https://www.zhipin.com/web/user/?ka=header-login";
-    private static final String BOSS_HOME_URL  = "zhipin.com";
+    private static final String BOSS_HOME      = "zhipin.com";
 
     private WebView webView;
     private ProgressBar progressBar;
@@ -36,28 +36,36 @@ public class LoginActivity extends AppCompatActivity {
         progressBar = findViewById(R.id.loginProgress);
         tvHint      = findViewById(R.id.tvLoginHint);
 
-        findViewById(R.id.btnBack).setOnClickListener(v -> onBackPressed());
+        findViewById(R.id.btnBack).setOnClickListener(v -> goBackOrFinish());
 
         setupWebView();
         webView.loadUrl(BOSS_LOGIN_URL);
     }
 
+    private void goBackOrFinish() {
+        if (webView != null && webView.canGoBack()) {
+            webView.goBack();
+        } else {
+            finish();
+        }
+    }
+
     private void setupWebView() {
-        WebSettings settings = webView.getSettings();
-        settings.setJavaScriptEnabled(true);
-        settings.setDomStorageEnabled(true);
-        settings.setLoadWithOverviewMode(true);
-        settings.setUseWideViewPort(true);
-        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        settings.setUserAgentString(
+        WebSettings s = webView.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setLoadWithOverviewMode(true);
+        s.setUseWideViewPort(true);
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        s.setUserAgentString(
             "Mozilla/5.0 (Linux; Android 11; Pixel 5) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) " +
             "Chrome/120.0.0.0 Mobile Safari/537.36"
         );
 
-        // 同步 WebView Cookie 到 CookieManager
-        CookieManager.getInstance().setAcceptCookie(true);
-        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
+        CookieManager cm = CookieManager.getInstance();
+        cm.setAcceptCookie(true);
+        cm.setAcceptThirdPartyCookies(webView, true);
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -68,16 +76,13 @@ public class LoginActivity extends AppCompatActivity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 progressBar.setVisibility(View.GONE);
-
-                // 检测是否已登录（跳转到主页说明登录成功）
-                if (url != null && isLoggedIn(url)) {
+                if (url != null && detectLogin(url)) {
                     extractAndSaveCookie(url);
                 }
             }
 
             @Override
-            public boolean shouldOverrideUrlLoading(WebResourceRequest request) {
-                // 所有链接都在 WebView 内打开
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 return false;
             }
         });
@@ -86,34 +91,24 @@ public class LoginActivity extends AppCompatActivity {
             @Override
             public void onProgressChanged(WebView view, int newProgress) {
                 progressBar.setProgress(newProgress);
-                if (newProgress == 100) {
-                    progressBar.setVisibility(View.GONE);
-                }
+                if (newProgress == 100) progressBar.setVisibility(View.GONE);
             }
         });
     }
 
-    /**
-     * 判断是否已登录：登录成功后 Boss 会跳转回主页或个人中心
-     */
-    private boolean isLoggedIn(String url) {
-        return (url.contains(BOSS_HOME_URL) && !url.contains("/web/user/"))
+    private boolean detectLogin(String url) {
+        return (url.contains(BOSS_HOME) && !url.contains("/web/user/"))
                 || url.contains("/web/geek/")
                 || url.equals("https://www.zhipin.com/");
     }
 
     private void extractAndSaveCookie(String url) {
         CookieManager cm = CookieManager.getInstance();
-        // 确保 Cookie 已同步
         cm.flush();
-
         String cookies = cm.getCookie("https://www.zhipin.com");
-        if (cookies == null || cookies.isEmpty()) {
-            cookies = cm.getCookie(url);
-        }
+        if (cookies == null || cookies.isEmpty()) cookies = cm.getCookie(url);
 
         if (cookies != null && cookies.contains("wt2")) {
-            // 保存 Cookie 到 SharedPreferences
             SharedPreferences prefs = getSharedPreferences("boss_prefs", Context.MODE_PRIVATE);
             prefs.edit()
                  .putString("cookie", cookies)
@@ -123,31 +118,19 @@ public class LoginActivity extends AppCompatActivity {
 
             Toast.makeText(this, "登录成功！正在获取真实招聘数据...", Toast.LENGTH_SHORT).show();
 
-            // 返回主界面并刷新
             Intent intent = new Intent(this, MainActivity.class);
             intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
             intent.putExtra("refresh", true);
             startActivity(intent);
             finish();
         } else {
-            // Cookie 里还没有 wt2，说明登录流程未完成，继续等待
             tvHint.setText("请完成扫码或账号密码登录...");
-        }
-    }
-
-    public void onBackPressed() {
-        if (webView != null && webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            finish();
         }
     }
 
     @Override
     protected void onDestroy() {
-        if (webView != null) {
-            webView.destroy();
-        }
+        if (webView != null) webView.destroy();
         super.onDestroy();
     }
 }
