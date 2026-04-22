@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class JobViewModel extends AndroidViewModel {
 
     private static final String TAG              = "JobViewModel";
-    private static final int    REFRESH_INTERVAL = 300; // seconds
+    private static final int    REFRESH_INTERVAL = 180; // 3 minutes
 
     private final MutableLiveData<List<JobItem>> filteredJobs   = new MutableLiveData<>(new ArrayList<>());
     private final MutableLiveData<Boolean>       isLoading      = new MutableLiveData<>(false);
@@ -34,16 +34,16 @@ public class JobViewModel extends AndroidViewModel {
     private final MutableLiveData<Integer>       countdownSecs  = new MutableLiveData<>(REFRESH_INTERVAL);
     private final MutableLiveData<Boolean>       isRealData     = new MutableLiveData<>(null);
 
-    private final BossApiClient  api;
-    private final Handler        mainHandler = new Handler(Looper.getMainLooper());
-    private final AtomicInteger  cdAtom      = new AtomicInteger(REFRESH_INTERVAL);
+    private final BossApiClient api;
+    private final Handler       mainHandler = new Handler(Looper.getMainLooper());
+    private final AtomicInteger cdAtom      = new AtomicInteger(REFRESH_INTERVAL);
 
-    private String cityCode = "100010000";
-    private String cityName = "全国";
+    private String  cityCode = "530"; // 全国
+    private String  cityName = "全国";
+    private boolean fetching = false;
 
     private Timer refreshTimer;
     private Timer countdownTimer;
-    private boolean fetching = false;
 
     public JobViewModel(@NonNull Application app) {
         super(app);
@@ -51,22 +51,22 @@ public class JobViewModel extends AndroidViewModel {
         startTimers();
     }
 
-    // ── Public LiveData getters ──────────────────────────────────────────
+    // ── LiveData ─────────────────────────────────────────────────────────
 
-    public LiveData<List<JobItem>> getFilteredJobs()   { return filteredJobs; }
-    public LiveData<Boolean>       getIsLoading()      { return isLoading; }
-    public LiveData<String>        getErrorMessage()   { return errorMessage; }
-    public LiveData<String>        getLastUpdateTime() { return lastUpdateTime; }
+    public LiveData<List<JobItem>> getFilteredJobs()    { return filteredJobs; }
+    public LiveData<Boolean>       getIsLoading()       { return isLoading; }
+    public LiveData<String>        getErrorMessage()    { return errorMessage; }
+    public LiveData<String>        getLastUpdateTime()  { return lastUpdateTime; }
     public LiveData<Integer>       getCountdownSeconds(){ return countdownSecs; }
-    public LiveData<Boolean>       getIsRealData()     { return isRealData; }
+    public LiveData<Boolean>       getIsRealData()      { return isRealData; }
 
     // ── Actions ──────────────────────────────────────────────────────────
 
     public void fetchJobs(String code, String name) {
-        if (fetching) return;      // guard against concurrent calls
-        fetching  = true;
-        cityCode  = code;
-        cityName  = name;
+        if (fetching) return;
+        fetching = true;
+        cityCode = code;
+        cityName = name;
         isLoading.postValue(true);
         errorMessage.postValue(null);
 
@@ -81,6 +81,7 @@ public class JobViewModel extends AndroidViewModel {
                         new SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(new Date()));
                 cdAtom.set(REFRESH_INTERVAL);
                 countdownSecs.postValue(REFRESH_INTERVAL);
+                Log.d(TAG, "fetchJobs success: " + jobs.size() + " jobs, real=" + real);
             }
 
             @Override
@@ -93,12 +94,6 @@ public class JobViewModel extends AndroidViewModel {
                 countdownSecs.postValue(REFRESH_INTERVAL);
             }
         });
-    }
-
-    public void logout() {
-        // Optionally clear cached data; timers keep running
-        filteredJobs.postValue(new ArrayList<>());
-        isRealData.postValue(null);
     }
 
     // ── Timers ───────────────────────────────────────────────────────────
