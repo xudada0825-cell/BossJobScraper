@@ -5,7 +5,6 @@
     android:orientation="vertical"
     android:background="#FFFFFF">
 
-    <!-- 顶部标题栏 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="56dp"
@@ -23,14 +22,13 @@
             android:textColor="#FFFFFF"
             android:textSize="22sp"
             android:textStyle="bold"
-            android:gravity="center"
-            android:id="@+id/btnBack" />
+            android:gravity="center" />
 
         <TextView
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="Boss直聘 扫码登录"
+            android:text="Boss\u76f4\u8058 \u626b\u7801\u767b\u5f55"
             android:textColor="#FFFFFF"
             android:textSize="17sp"
             android:textStyle="bold"
@@ -38,20 +36,18 @@
 
     </LinearLayout>
 
-    <!-- 提示条 -->
     <TextView
         android:id="@+id/tvLoginHint"
         android:layout_width="match_parent"
         android:layout_height="38dp"
         android:gravity="center"
-        android:text="使用Boss直聘App扫描二维码登录，登录后自动获取真实招聘数据"
+        android:text="\u4f7f\u7528Boss\u76f4\u8058App\u626b\u63cf\u4e8c\u7ef4\u7801\u767b\u5f55\uff0c\u767b\u5f55\u540e\u81ea\u52a8\u83b7\u53d6\u771f\u5b9e\u62db\u8058\u6570\u636e"
         android:textSize="12sp"
         android:textColor="#FFFFFF"
         android:background="#FF6F00"
         android:paddingStart="12dp"
         android:paddingEnd="12dp" />
 
-    <!-- 进度条 -->
     <ProgressBar
         android:id="@+id/loginProgress"
         android:layout_width="match_parent"
@@ -62,7 +58,6 @@
         android:progressTint="#1565C0"
         android:visibility="visible" />
 
-    <!-- WebView -->
     <WebView
         android:id="@+id/webView"
         android:layout_width="match_parent"
