@@ -2,6 +2,8 @@ package com.bossscraper.app;
 
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
@@ -26,9 +28,9 @@ import java.util.Locale;
 public class MainActivity extends AppCompatActivity {
 
     private JobViewModel viewModel;
-    private JobAdapter adapter;
+    private JobAdapter   adapter;
 
-    private Spinner  spinnerCity;
+    private Spinner    spinnerCity;
     private RecyclerView recyclerView;
     private SwipeRefreshLayout swipeRefresh;
     private ProgressBar progressBar;
@@ -38,7 +40,8 @@ public class MainActivity extends AppCompatActivity {
     private View emptyView;
     private androidx.appcompat.widget.AppCompatButton btnRefresh;
 
-    private boolean isSpinnerInitialized = false;
+    private boolean spinnerReady = false;
+    private final Handler handler = new Handler(Looper.getMainLooper());
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -46,27 +49,45 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         initViews();
-        initViewModel();
+        // ViewModel 必须在 initViews 之后初始化
+        viewModel = new ViewModelProvider(this).get(JobViewModel.class);
+        observeViewModel();
         setupCitySpinner();
         setupRecyclerView();
         setupSwipeRefresh();
         setupButtons();
 
-        viewModel.fetchJobs("100010000", "全国");
+        // 首次加载
+        triggerRefresh();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        // 从登录页返回后刷新状态
-        updateLoginStateUI(viewModel.isLoggedIn());
-        if (getIntent().getBooleanExtra("refresh", false)) {
-            getIntent().removeExtra("refresh");
-            viewModel.fetchJobs(
-                    BossApiClient.CITY_CODES[spinnerCity.getSelectedItemPosition()][1],
-                    BossApiClient.CITY_CODES[spinnerCity.getSelectedItemPosition()][0]);
+        // 直接读 SharedPreferences，避免 ViewModel 未初始化时的竞争
+        boolean loggedIn = getSharedPreferences("boss_prefs", MODE_PRIVATE)
+                .getBoolean("logged_in", false);
+        updateLoginStateUI(loggedIn);
+
+        if (getIntent() != null && getIntent().getBooleanExtra("refresh_after_login", false)) {
+            getIntent().removeExtra("refresh_after_login");
+            handler.postDelayed(this::triggerRefresh, 400);
         }
     }
+
+    @Override
+    protected void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
+        super.onDestroy();
+    }
+
+    // ── 初始化 ──────────────────────────────────────────────
 
     private void initViews() {
         spinnerCity      = findViewById(R.id.spinnerCity);
@@ -84,9 +105,7 @@ public class MainActivity extends AppCompatActivity {
         btnRefresh       = findViewById(R.id.btnRefresh);
     }
 
-    private void initViewModel() {
-        viewModel = new ViewModelProvider(this).get(JobViewModel.class);
-
+    private void observeViewModel() {
         viewModel.getFilteredJobs().observe(this, jobs -> {
             if (jobs != null && !jobs.isEmpty()) {
                 adapter.setJobs(jobs);
@@ -102,6 +121,7 @@ public class MainActivity extends AppCompatActivity {
         });
 
         viewModel.getIsLoading().observe(this, loading -> {
+            if (loading == null) return;
             progressBar.setVisibility(loading ? View.VISIBLE : View.GONE);
             btnRefresh.setEnabled(!loading);
             btnRefresh.setText(loading ? "加载中..." : "立即刷新");
@@ -109,42 +129,29 @@ public class MainActivity extends AppCompatActivity {
         });
 
         viewModel.getErrorMessage().observe(this, msg -> {
-            if (msg != null && !msg.isEmpty()) {
-                Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
-                // Cookie 过期时自动跳转登录页
-                if (msg.contains("登录已过期")) {
-                    updateLoginStateUI(false);
-                }
+            if (msg == null || msg.isEmpty()) return;
+            Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+            if (msg.contains("登录已过期")) {
+                updateLoginStateUI(false);
             }
         });
 
         viewModel.getLastUpdateTime().observe(this, time ->
-                tvLastUpdate.setText("最后更新：" + time));
+                tvLastUpdate.setText("最后更新：" + (time != null ? time : "--")));
 
         viewModel.getCountdownSeconds().observe(this, seconds -> {
-            if (seconds != null) {
-                int min = seconds / 60, sec = seconds % 60;
-                tvCountdown.setText(String.format(Locale.CHINA, "下次刷新：%02d:%02d", min, sec));
-            }
+            if (seconds == null) return;
+            int min = seconds / 60, sec = seconds % 60;
+            tvCountdown.setText(
+                    String.format(Locale.CHINA, "下次刷新：%02d:%02d", min, sec));
         });
 
         viewModel.getIsRealData().observe(this, realData -> {
-            updateLoginStateUI(realData != null && realData);
+            // 只在确认是真实数据时更新横幅，不能用 false 来强制"退出登录"状态
+            if (Boolean.TRUE.equals(realData)) {
+                updateLoginStateUI(true);
+            }
         });
-    }
-
-    private void updateLoginStateUI(boolean loggedIn) {
-        if (loggedIn) {
-            btnLoginStatus.setText("退出登录");
-            tvLoginState.setText("已登录 · 获取真实数据");
-            tvRealDataBanner.setVisibility(View.VISIBLE);
-            tvDemoBanner.setVisibility(View.GONE);
-        } else {
-            btnLoginStatus.setText("扫码登录");
-            tvLoginState.setText("未登录 · 显示演示数据");
-            tvRealDataBanner.setVisibility(View.GONE);
-            tvDemoBanner.setVisibility(View.VISIBLE);
-        }
     }
 
     private void setupCitySpinner() {
@@ -154,15 +161,17 @@ public class MainActivity extends AppCompatActivity {
         }
         ArrayAdapter<String> cityAdapter = new ArrayAdapter<>(
                 this, android.R.layout.simple_spinner_item, cityNames);
-        cityAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        cityAdapter.setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item);
         spinnerCity.setAdapter(cityAdapter);
 
         spinnerCity.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
-                if (!isSpinnerInitialized) { isSpinnerInitialized = true; return; }
-                viewModel.fetchJobs(BossApiClient.CITY_CODES[pos][1],
-                                    BossApiClient.CITY_CODES[pos][0]);
+                if (!spinnerReady) { spinnerReady = true; return; }
+                viewModel.fetchJobs(
+                        BossApiClient.CITY_CODES[pos][1],
+                        BossApiClient.CITY_CODES[pos][0]);
             }
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
@@ -182,7 +191,6 @@ public class MainActivity extends AppCompatActivity {
     private void setupButtons() {
         btnRefresh.setOnClickListener(v -> triggerRefresh());
 
-        // 登录/退出 按钮
         btnLoginStatus.setOnClickListener(v -> {
             if (viewModel.isLoggedIn()) {
                 new AlertDialog.Builder(this)
@@ -199,16 +207,32 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        // 演示横幅点击也能跳转登录
         tvDemoBanner.setOnClickListener(v ->
                 startActivity(new Intent(this, LoginActivity.class)));
     }
 
+    // ── 工具方法 ─────────────────────────────────────────────
+
     private void triggerRefresh() {
+        if (viewModel == null) return;
         int pos = spinnerCity.getSelectedItemPosition();
-        if (pos >= 0 && pos < BossApiClient.CITY_CODES.length) {
-            viewModel.fetchJobs(BossApiClient.CITY_CODES[pos][1],
-                                BossApiClient.CITY_CODES[pos][0]);
+        if (pos < 0 || pos >= BossApiClient.CITY_CODES.length) pos = 0;
+        viewModel.fetchJobs(
+                BossApiClient.CITY_CODES[pos][1],
+                BossApiClient.CITY_CODES[pos][0]);
+    }
+
+    private void updateLoginStateUI(boolean loggedIn) {
+        if (loggedIn) {
+            btnLoginStatus.setText("退出登录");
+            tvLoginState.setText("已登录 · 获取真实数据");
+            tvRealDataBanner.setVisibility(View.VISIBLE);
+            tvDemoBanner.setVisibility(View.GONE);
+        } else {
+            btnLoginStatus.setText("扫码登录");
+            tvLoginState.setText("未登录 · 显示演示数据");
+            tvRealDataBanner.setVisibility(View.GONE);
+            tvDemoBanner.setVisibility(View.VISIBLE);
         }
     }
 }
