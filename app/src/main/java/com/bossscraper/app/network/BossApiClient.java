@@ -24,15 +24,16 @@ import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Loads the Boss ZhiPin search page in a hidden WebView, waits for the page
- * JS to finish initialising, then injects a fetch() call from inside the page
- * so all cookies / anti-scraping tokens are handled by the browser engine.
- * The result is passed back via a JavascriptInterface.
+ * Fetches jobs by reusing the SAME WebView that was used for login,
+ * or creating a new one for guest access. The key insight: after a
+ * real user login in WebView, all session cookies are already present.
+ * We inject a same-origin fetch() via JS so all tokens are handled by
+ * the browser engine automatically.
  */
 public class BossApiClient {
 
     private static final String TAG        = "BossApiClient";
-    private static final int    TIMEOUT_MS = 30_000;   // 30 s total
+    private static final int    TIMEOUT_MS = 25_000;
 
     public static final String[][] CITY_CODES = {
             {"全国",  "100010000"}, {"北京",  "101010100"}, {"上海",  "101020100"},
@@ -52,11 +53,26 @@ public class BossApiClient {
     private final Context appCtx;
     private final Handler main = new Handler(Looper.getMainLooper());
 
-    private WebView      wv;
-    private boolean      destroyed = false;
+    // The shared WebView — set from LoginActivity after successful login
+    private static WebView sharedWebView;
+    private static String  sharedWebViewUrl; // last URL loaded in sharedWebView
+
+    private boolean destroyed = false;
 
     public BossApiClient(Context ctx) {
         this.appCtx = ctx.getApplicationContext();
+    }
+
+    /** Called by LoginActivity after login succeeds, before destroying the WebView. */
+    public static void setSharedWebView(WebView wv, String currentUrl) {
+        sharedWebView    = wv;
+        sharedWebViewUrl = currentUrl;
+        Log.d("BossApiClient", "sharedWebView set, url=" + currentUrl);
+    }
+
+    public static void clearSharedWebView() {
+        sharedWebView    = null;
+        sharedWebViewUrl = null;
     }
 
     public boolean isLoggedIn() {
@@ -68,29 +84,92 @@ public class BossApiClient {
     public void logout() {
         appCtx.getSharedPreferences("boss_prefs", Context.MODE_PRIVATE)
               .edit().clear().apply();
+        clearSharedWebView();
     }
 
     public void destroy() {
         destroyed = true;
         main.removeCallbacksAndMessages(null);
-        main.post(this::destroyWv);
     }
 
-    // ── Entry point (must be called on any thread) ───────────────────────
+    // ── Entry point ──────────────────────────────────────────────────────
 
     public void fetchForeignTradeJobs(String cityCode, FetchCallback cb) {
         main.post(() -> {
             if (destroyed) return;
-            destroyWv();
-            doFetch(cityCode, cb);
+            if (sharedWebView != null) {
+                fetchViaSharedWebView(cityCode, cb);
+            } else {
+                fetchViaNewWebView(cityCode, cb);
+            }
         });
     }
 
-    // ── Core: hidden WebView + in-page fetch() ───────────────────────────
+    // ── Strategy A: reuse the login WebView (has full session) ───────────
+
+    private void fetchViaSharedWebView(String cityCode, FetchCallback cb) {
+        WebView wv = sharedWebView;
+        AtomicBoolean done = new AtomicBoolean(false);
+
+        // Add JS bridge temporarily
+        String bridgeName = "AndroidBridge" + System.currentTimeMillis();
+
+        Object bridge = new Object() {
+            @JavascriptInterface
+            public void onResult(String json) {
+                if (done.getAndSet(true)) return;
+                main.removeCallbacksAndMessages(null);
+                Log.d(TAG, "sharedWV result len=" + json.length());
+                List<JobItem> jobs = parseJoblist(json);
+                Log.d(TAG, "parsed=" + jobs.size());
+                main.post(() -> {
+                    if (jobs.isEmpty()) cb.onSuccess(generateDemo(), false);
+                    else cb.onSuccess(jobs, true);
+                });
+            }
+            @JavascriptInterface
+            public void onError(String msg) {
+                if (done.getAndSet(true)) return;
+                main.removeCallbacksAndMessages(null);
+                Log.e(TAG, "sharedWV JS error: " + msg);
+                main.post(() -> cb.onSuccess(generateDemo(), false));
+            }
+        };
+
+        wv.addJavascriptInterface(bridge, bridgeName);
+
+        main.postDelayed(() -> {
+            if (done.getAndSet(true)) return;
+            Log.w(TAG, "sharedWV timeout, falling back to new WebView");
+            fetchViaNewWebView(cityCode, cb);
+        }, TIMEOUT_MS);
+
+        // If the shared WebView is already on zhipin.com, inject fetch directly.
+        // Otherwise navigate to search page first.
+        String currentUrl = sharedWebViewUrl != null ? sharedWebViewUrl : "";
+        if (currentUrl.contains("zhipin.com")) {
+            injectFetch(wv, bridgeName, cityCode);
+        } else {
+            // Need to navigate first — wait for onPageFinished
+            wv.setWebViewClient(new WebViewClient() {
+                @Override
+                public void onPageFinished(WebView view, String url) {
+                    if (done.get()) return;
+                    sharedWebViewUrl = url;
+                    if (url != null && url.contains("zhipin.com")) {
+                        injectFetch(view, bridgeName, cityCode);
+                    }
+                }
+            });
+            wv.loadUrl("https://www.zhipin.com/web/geek/job?query=%E5%A4%96%E8%B4%B8&city=" + cityCode);
+        }
+    }
+
+    // ── Strategy B: new WebView (for non-logged-in, loads page fresh) ───
 
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
-    private void doFetch(String cityCode, FetchCallback cb) {
-        wv = new WebView(appCtx);
+    private void fetchViaNewWebView(String cityCode, FetchCallback cb) {
+        WebView wv = new WebView(appCtx);
         WebSettings s = wv.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
@@ -103,90 +182,74 @@ public class BossApiClient {
 
         AtomicBoolean done = new AtomicBoolean(false);
 
-        // JS bridge — called from inside the page context, so cookies are intact
         Object bridge = new Object() {
             @JavascriptInterface
             public void onResult(String json) {
-                Log.d(TAG, "onResult len=" + json.length()
-                        + " preview=" + json.substring(0, Math.min(200, json.length())));
                 if (done.getAndSet(true)) return;
                 main.removeCallbacksAndMessages(null);
+                Log.d(TAG, "newWV result len=" + json.length());
                 List<JobItem> jobs = parseJoblist(json);
-                Log.d(TAG, "parsed jobs=" + jobs.size());
+                Log.d(TAG, "parsed=" + jobs.size());
                 main.post(() -> {
-                    destroyWv();
-                    if (jobs.isEmpty()) {
-                        cb.onSuccess(generateDemo(), false);
-                    } else {
-                        cb.onSuccess(jobs, true);
-                    }
+                    destroyWv(wv);
+                    if (jobs.isEmpty()) cb.onSuccess(generateDemo(), false);
+                    else cb.onSuccess(jobs, true);
                 });
             }
-
             @JavascriptInterface
             public void onError(String msg) {
-                Log.e(TAG, "JS onError: " + msg);
                 if (done.getAndSet(true)) return;
                 main.removeCallbacksAndMessages(null);
-                main.post(() -> {
-                    destroyWv();
-                    cb.onSuccess(generateDemo(), false);
-                });
+                Log.e(TAG, "newWV JS error: " + msg);
+                main.post(() -> { destroyWv(wv); cb.onSuccess(generateDemo(), false); });
             }
         };
         wv.addJavascriptInterface(bridge, "AndroidBridge");
 
-        // Timeout fallback
-        Runnable timeoutTask = () -> {
+        main.postDelayed(() -> {
             if (done.getAndSet(true)) return;
-            Log.w(TAG, "fetch timeout");
-            destroyWv();
-            cb.onSuccess(generateDemo(), false);
-        };
-        main.postDelayed(timeoutTask, TIMEOUT_MS);
+            Log.w(TAG, "newWV timeout");
+            main.post(() -> { destroyWv(wv); cb.onSuccess(generateDemo(), false); });
+        }, TIMEOUT_MS);
 
         wv.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
-                Log.d(TAG, "onPageFinished: " + url);
                 if (done.get()) return;
-
-                // After the page loads, inject fetch() from inside the page.
-                // Same-origin fetch — browser uses page cookies automatically.
-                String apiUrl = "https://www.zhipin.com/wapi/zpgeek/search/joblist.json"
-                        + "?scene=1"
-                        + "&query=" + encode("外贸")
-                        + "&city=" + cityCode
-                        + "&publishTime=1"
-                        + "&page=1&pageSize=30";
-
-                String js = "(function() {\n"
-                        + "  fetch('" + apiUrl + "', {\n"
-                        + "    credentials: 'include',\n"
-                        + "    headers: {\n"
-                        + "      'Accept': 'application/json, text/plain, */*',\n"
-                        + "      'X-Requested-With': 'XMLHttpRequest'\n"
-                        + "    }\n"
-                        + "  })\n"
-                        + "  .then(function(r) { return r.text(); })\n"
-                        + "  .then(function(t) { AndroidBridge.onResult(t); })\n"
-                        + "  .catch(function(e) { AndroidBridge.onError(e.toString()); });\n"
-                        + "})();";
-
-                view.evaluateJavascript(js, null);
+                Log.d(TAG, "newWV onPageFinished: " + url);
+                injectFetch(view, "AndroidBridge", cityCode);
             }
         });
 
-        // Load the search page first so we're in same-origin context
-        String pageUrl = "https://www.zhipin.com/web/geek/job"
-                + "?query=" + encode("外贸")
-                + "&city=" + cityCode
-                + "&publishTime=1";
-        Log.d(TAG, "loadUrl: " + pageUrl);
-        wv.loadUrl(pageUrl);
+        String url = "https://www.zhipin.com/web/geek/job"
+                + "?query=%E5%A4%96%E8%B4%B8&city=" + cityCode + "&publishTime=1";
+        Log.d(TAG, "newWV loadUrl: " + url);
+        wv.loadUrl(url);
     }
 
-    // ── Parse joblist JSON ───────────────────────────────────────────────
+    // ── Inject same-origin fetch() into the running page ────────────────
+
+    private void injectFetch(WebView wv, String bridgeName, String cityCode) {
+        String apiUrl = "https://www.zhipin.com/wapi/zpgeek/search/joblist.json"
+                + "?scene=1&query=%E5%A4%96%E8%B4%B8&city=" + cityCode
+                + "&publishTime=1&page=1&pageSize=30";
+
+        String js =
+            "(function(){\n" +
+            "  fetch('" + apiUrl + "',{\n" +
+            "    credentials:'include',\n" +
+            "    headers:{'Accept':'application/json','X-Requested-With':'XMLHttpRequest'}\n" +
+            "  })\n" +
+            "  .then(function(r){return r.text();})\n" +
+            "  .then(function(t){" + bridgeName + ".onResult(t);})\n" +
+            "  .catch(function(e){" + bridgeName + ".onError(e.toString());});\n" +
+            "})();";
+
+        Log.d(TAG, "injectFetch apiUrl=" + apiUrl);
+        wv.evaluateJavascript(js, null);
+    }
+
+    // ── Parse response ───────────────────────────────────────────────────
 
     private List<JobItem> parseJoblist(String json) {
         List<JobItem> out = new ArrayList<>();
@@ -195,8 +258,8 @@ public class BossApiClient {
             JsonObject root = JsonParser.parseString(json).getAsJsonObject();
             int code = root.has("code") ? root.get("code").getAsInt() : -1;
             if (code != 0) {
-                Log.w(TAG, "API code=" + code
-                        + " msg=" + (root.has("message") ? root.get("message") : "?"));
+                Log.w(TAG, "API code=" + code + " msg="
+                        + (root.has("message") ? root.get("message").getAsString() : "?"));
                 return out;
             }
             JsonObject zpData = root.has("zpData") ? root.getAsJsonObject("zpData") : null;
@@ -212,8 +275,7 @@ public class BossApiClient {
                     String area   = str(j, "areaDistrict");
                     String biz    = str(j, "businessDistrict");
                     String encId  = str(j, "encryptJobId");
-                    String jobUrl = encId.isEmpty()
-                            ? "https://www.zhipin.com"
+                    String jobUrl = encId.isEmpty() ? "https://www.zhipin.com"
                             : "https://www.zhipin.com/job_detail/" + encId + ".html";
                     out.add(new JobItem(
                             str(j, "jobName"), str(j, "brandName"),
@@ -221,44 +283,36 @@ public class BossApiClient {
                             str(j, "salaryDesc"), time, jobUrl,
                             str(j, "brandIndustry"), str(j, "brandScaleName")));
                 } catch (Exception e) {
-                    Log.w(TAG, "skip job: " + e.getMessage());
+                    Log.w(TAG, "skip: " + e.getMessage());
                 }
             }
         } catch (Exception e) {
-            Log.e(TAG, "parseJoblist: " + e.getMessage());
+            Log.e(TAG, "parse: " + e.getMessage());
         }
         return out;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
-    private void destroyWv() {
+    private void destroyWv(WebView wv) {
         if (wv == null) return;
         try { wv.stopLoading(); wv.setWebViewClient(null); wv.destroy(); }
         catch (Exception ignored) {}
-        wv = null;
     }
 
     private String addr(String city, String area, String biz) {
         StringBuilder sb = new StringBuilder();
         if (!mt(city)) sb.append(city);
-        if (!mt(area)) { if (sb.length() > 0) sb.append(" · "); sb.append(area); }
-        if (!mt(biz))  { if (sb.length() > 0) sb.append(" · "); sb.append(biz); }
-        return sb.length() > 0 ? sb.toString() : "地址未知";
+        if (!mt(area)) { if (sb.length()>0) sb.append(" · "); sb.append(area); }
+        if (!mt(biz))  { if (sb.length()>0) sb.append(" · "); sb.append(biz); }
+        return sb.length()>0 ? sb.toString() : "地址未知";
     }
 
-    private boolean mt(String s) { return s == null || s.isEmpty(); }
+    private boolean mt(String s) { return s==null||s.isEmpty(); }
 
     private String str(JsonObject o, String k) {
-        try {
-            JsonElement e = o.get(k);
-            return (e != null && !e.isJsonNull()) ? e.getAsString() : "";
-        } catch (Exception x) { return ""; }
-    }
-
-    private String encode(String s) {
-        try { return java.net.URLEncoder.encode(s, "UTF-8"); }
-        catch (Exception e) { return s; }
+        try { JsonElement e=o.get(k); return e!=null&&!e.isJsonNull()?e.getAsString():""; }
+        catch(Exception x){return "";}
     }
 
     private List<JobItem> generateDemo() {
@@ -272,8 +326,8 @@ public class BossApiClient {
             {"外贸销售代表", "上海亚太国际",   "上海", "浦东",  "12-20K", "贸易",   "200-499人"},
         };
         for (String[] r : d)
-            list.add(new JobItem(r[0], r[1], r[2] + "·" + r[3], r[2], r[3],
-                    r[4], t, "https://www.zhipin.com/", r[5], r[6]));
+            list.add(new JobItem(r[0],r[1],r[2]+"·"+r[3],r[2],r[3],r[4],t,
+                    "https://www.zhipin.com/",r[5],r[6]));
         return list;
     }
 }
