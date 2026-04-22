@@ -36,6 +36,8 @@ public class LoginActivity extends AppCompatActivity {
         progressBar = findViewById(R.id.loginProgress);
         tvHint      = findViewById(R.id.tvLoginHint);
 
+        findViewById(R.id.btnBack).setOnClickListener(v -> onBackPressed());
+
         setupWebView();
         webView.loadUrl(BOSS_LOGIN_URL);
     }
@@ -133,12 +135,11 @@ public class LoginActivity extends AppCompatActivity {
         }
     }
 
-    @Override
     public void onBackPressed() {
-        if (webView.canGoBack()) {
+        if (webView != null && webView.canGoBack()) {
             webView.goBack();
         } else {
-            super.onBackPressed();
+            finish();
         }
     }
 
